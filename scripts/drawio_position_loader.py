@@ -19,29 +19,12 @@ import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-import yaml
+import inventory
 
 
 def _collect_inventory_hosts(inventory_path: str | Path) -> set[str]:
-    """Walk an Ansible inventory YAML and collect every hostname under any
-    'hosts:' key, regardless of how deeply the groups are nested."""
-    with open(inventory_path) as f:
-        data = yaml.safe_load(f) or {}
-
-    found: set[str] = set()
-
-    def walk(node) -> None:
-        if not isinstance(node, dict):
-            return
-        hosts = node.get("hosts")
-        if isinstance(hosts, dict):
-            found.update(hosts.keys())
-        for value in node.values():
-            if isinstance(value, dict):
-                walk(value)
-
-    walk(data)
-    return found
+    """Every hostname under any 'hosts:' key, however deeply nested."""
+    return set(inventory.host_vars(inventory_path))
 
 
 def _label_text(raw: str | None) -> str:

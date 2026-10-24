@@ -14,6 +14,10 @@ label near each end of a link, and a green/red status dot at its midpoint
 separate pass (parse the string back into a tree, add cells, re-serialize)
 specifically so build_drawio_xml() itself stays exactly as provided rather
 than being modified to know about project-specific details.
+
+render_tree() returns the ElementTree root instead of a string, so main.py
+can hand it to the feature plugins (features/) to add their own layers
+before it's serialized.
 """
 import xml.etree.ElementTree as ET
 
@@ -145,6 +149,12 @@ def _add_edge_label(root, edge_id, text, x_fraction, suffix, style):
 
 
 def render(nodes, specs, edges_by_id, icons_by_id=None, icon_library=None):
+    """render_tree(), serialized to a string."""
+    return ET.tostring(render_tree(nodes, specs, edges_by_id, icons_by_id, icon_library),
+                       encoding="unicode")
+
+
+def render_tree(nodes, specs, edges_by_id, icons_by_id=None, icon_library=None):
     """Build the base XML via build_drawio_xml(), then add this project's
     IP/interface labels. Interface backgrounds change color based on link status.
     edges_by_id maps each LinkSpec's id to this project's edge dict.
@@ -210,4 +220,4 @@ def render(nodes, specs, edges_by_id, icons_by_id=None, icon_library=None):
         _add_edge_label(root, s.id, abbreviate_intf(edge["target_intf"]),
                          1.0, "intf-tgt", dst_style)
 
-    return ET.tostring(mxfile, encoding="unicode")
+    return mxfile

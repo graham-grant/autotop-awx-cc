@@ -5,8 +5,14 @@ playbooks/gather_topology.yml.
 
 This is the coordinator: load data (parser.py), decide node positions and
 route every link through the Hanan-grid A* engine (pathfinder.py), then
-emit draw.io XML with IP/interface labels and status dots (renderer.py).
-Tunable settings live in config.py.
+emit draw.io XML with IP/interface labels and status dots (renderer.py),
+then let each enabled protocol feature (features/ - e.g. IPsec tunnels)
+draw itself onto its own layer. Tunable settings live in config.py.
+
+Runs on a base Python 3 install: no third-party packages. Host JSON is raw
+show-command output normalized by netparse/, inventory.yml is read by
+miniyaml.py, and the A* router's search runs in a C extension that
+build_ext.py compiles on first run (needs gcc + Python headers).
 
 Links are derived from directly-connected subnets: every interface IP
 NAPALM reports is grouped by network, and any subnet shared by exactly two
@@ -45,13 +51,17 @@ library exactly, e.g. icon: "C9200-24P Front". A host with no icon set
 falls back to the plain rectangle.
 """
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import config
+import features
+from features.context import Topology
 import parser
 import pathfinder
 import renderer
 import icon_library
+import inventory
 import drawio_position_loader as dpl
 
 
@@ -85,46 +95,24 @@ def _place_unpinned_nodes(pinned, unpinned_names):
 
 
 def _load_node_sizes(inventory_path, node_names):
-    """Parses inventory.yml to find host-specific 'w' and 'h' dimensions.
-    Falls back to config defaults if not found or if parsing fails.
+    """Host-specific 'w' and 'h' dimensions from inventory.yml (group vars
+    inherited). Falls back to config defaults if not set, or for every
+    node if the inventory can't be read.
     """
-    sizes = {}
     try:
-        import yaml
-        with open(inventory_path, "r") as f:
-            inv_data = yaml.safe_load(f) or {}
+        all_hosts = inventory.host_vars(inventory_path)
+    except (OSError, ValueError) as e:
+        print(f"Note: couldn't read node sizes from {inventory_path} ({e}) - using defaults.")
+        all_hosts = {}
 
-        # Recursively extract hosts and their variables from inventory tree
-        def find_hosts(d):
-            hosts = {}
-            if isinstance(d, dict):
-                if "hosts" in d and isinstance(d["hosts"], dict):
-                    for hname, hvars in d["hosts"].items():
-                        hosts[hname] = hvars or {}
-                for k, v in d.items():
-                    if k != "hosts":
-                        hosts.update(find_hosts(v))
-            return hosts
-
-        all_hosts = find_hosts(inv_data)
-
-        for name in node_names:
-            hvars = all_hosts.get(name, {})
-            # Support both nested 'hosts' style and top-level flat dict style
-            if not hvars and name in inv_data and isinstance(inv_data[name], dict):
-                hvars = inv_data[name]
-
-            w = hvars.get("w") if hvars else None
-            h = hvars.get("h") if hvars else None
-
-            sizes[name] = (
-                int(w) if w is not None else config.DEFAULT_NODE_W,
-                int(h) if h is not None else config.DEFAULT_NODE_H
-            )
-    except Exception:
-        # Strict fallback behavior on missing module or malformed YAML
-        sizes = {name: (config.DEFAULT_NODE_W, config.DEFAULT_NODE_H) for name in node_names}
-
+    sizes = {}
+    for name in node_names:
+        hvars = all_hosts.get(name, {})
+        w, h = hvars.get("w"), hvars.get("h")
+        sizes[name] = (
+            int(w) if w is not None else config.DEFAULT_NODE_W,
+            int(h) if h is not None else config.DEFAULT_NODE_H,
+        )
     return sizes
 
 
@@ -168,12 +156,20 @@ def main():
 
     icons_by_id = parser.load_icons(inventory_path)
     icon_lib = icon_library.load_icon_library(icon_library_path)
-    xml_str = renderer.render(hanan_nodes, specs, edges_by_id, icons_by_id, icon_lib)
+    mxfile = renderer.render_tree(hanan_nodes, specs, edges_by_id, icons_by_id, icon_lib)
+
+    # Protocol features (features/), each on its own draw.io layer above the
+    # physical diagram. A feature that fails is reported and left out.
+    topo = Topology(nodes, edges, hanan_nodes, specs)
+    feature_results = features.run_features(mxfile.find(".//root"), topo)
+    xml_str = ET.tostring(mxfile, encoding="unicode")
 
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     out_path = Path(out_dir) / "topology.drawio"
     out_path.write_text(xml_str)
     print(f"\nWrote {len(nodes)} nodes and {len(edges)} links to {out_path}")
+    for name, status in feature_results.items():
+        print(f"  feature {name}: {status}")
 
     # Regenerate template.drawio from this run's final node positions/sizes,
     # so it always matches the current inventory and carries forward

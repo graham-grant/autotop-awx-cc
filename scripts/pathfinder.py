@@ -32,6 +32,27 @@ from dataclasses import dataclass, field
 from config import HANAN_BUFFER, HANAN_TURN_PENALTY, HANAN_MARGIN, HANAN_PERIMETER_MARGIN, HANAN_AFFINITY_PENALTY
 
 
+def _load_c_extension():
+    """The A* search runs in the required C extension csrc/_hanan.c.
+    It's compiled on first use (and whenever the source is newer than the
+    built module) by build_ext.py - stdlib only, but it does need a C
+    compiler and Python.h on this machine."""
+    import build_ext
+    try:
+        if build_ext.is_stale():
+            build_ext.build()
+        import _hanan
+    except (build_ext.BuildError, ImportError) as e:
+        raise RuntimeError(
+            f"The required C extension _hanan couldn't be built or loaded: {e}\n"
+            f"Run `python3 scripts/build_ext.py` to see the full error."
+        ) from e
+    return _hanan
+
+
+_hanan = _load_c_extension()
+
+
 # ---------------------------------------------------------------------------
 # Geometry primitives
 # ---------------------------------------------------------------------------
@@ -444,7 +465,43 @@ def _collapse_to_segments(link_id: str, target_id: str, points: list[Point]) -> 
 _SOFT_PENALTY = 5000.0  # fallback cost when no path respects the buffer at all
 
 
+def _flat_grid(grid: HananGrid):
+    """blocked/penalty flattened (index i*len(ys)+j) for the C search;
+    computed once per grid, since both are static."""
+    cached = getattr(grid, "_flat", None)
+    if cached is None:
+        blocked = bytes(1 if b else 0 for col in grid.base_blocked for b in col)
+        penalty = [p for col in grid.base_penalty for p in col]
+        cached = grid._flat = (blocked, penalty)
+    return cached
+
+
 def astar_route(
+    grid: HananGrid,
+    congestion: CongestionMap,
+    start_pts: list[Point],
+    goal_pts: list[Point],
+    target_id: str,
+    buffer: float,
+    turn_penalty: float,
+    affinity_penalty: float,
+    hard_buffer: bool = True,
+) -> list[Point] | None:
+    """A* over the Hanan grid, in C (csrc/_hanan.c). Same inputs, costs
+    and result as astar_route_py below, which is kept as the readable
+    reference implementation and checked against this in the tests."""
+    blocked, penalty = _flat_grid(grid)
+    segs = [(s.orientation == "H", s.fixed_coord, *s.span, s.target_id == target_id)
+            for s in congestion.segments]
+    path = _hanan.astar(
+        grid.xs, grid.ys, blocked, penalty, segs,
+        [grid.index_of(p) for p in start_pts], [grid.index_of(p) for p in goal_pts],
+        buffer, turn_penalty, affinity_penalty, _SOFT_PENALTY, hard_buffer,
+    )
+    return None if path is None else [grid.coord_of(i, j) for i, j in path]
+
+
+def astar_route_py(
     grid: HananGrid,
     congestion: CongestionMap,
     start_pts: list[Point],

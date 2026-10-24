@@ -1,18 +1,26 @@
 ---
-# Gathers interface facts, interface state, and IP addressing from every
-# host in the `network_devices` group via NAPALM, then writes one JSON file
-# per host to output/facts/. Run scripts/main.py afterwards to turn that
-# into a drawio diagram. Adjacency is derived from directly-connected
-# subnets (two hosts with an IP in the same subnet are linked), not LLDP -
-# see scripts/parser.py for why.
+# Gathers raw show-command output from every host in the `network_devices`
+# group over plain SSH (ansible.builtin.raw - no NAPALM, no network
+# collections, nothing to pip install), then writes one JSON file per host
+# to output/facts/. scripts/main.py parses that output (scripts/netparse/)
+# into the NAPALM-style schema the rest of the project uses and draws the
+# drawio diagram. Adjacency is derived from directly-connected subnets (two
+# hosts with an IP in the same subnet are linked), not LLDP - see
+# scripts/parser.py for why.
+#
+# Which commands get run is decided by scripts/commands.py: the core
+# commands netparse needs for the host's platform, plus whatever each
+# enabled feature plugin (scripts/features/) asks for. Adding a feature
+# never needs an edit here.
 #
 # Usage:
-#   export NAPALM_USERNAME=admin
-#   export NAPALM_PASSWORD=secret
+#   export NET_USERNAME=admin
+#   export NET_PASSWORD=secret
 #   ansible-playbook -i inventory.yml playbooks/gather_topology.yml
 
-- name: Prepare output directory
+- name: Prepare output directory and build the C extension
   hosts: localhost
+  connection: local
   gather_facts: no
   tasks:
     - name: Ensure output/facts directory exists
@@ -21,35 +29,46 @@
         state: directory
         mode: "0755"
 
-- name: Gather interface and addressing data from all inventory devices
-  hosts: network_devices
-  connection: local
-  gather_facts: no
-  tasks:
-    - name: Get facts, interface state, and IPs via NAPALM
-      napalm.napalm.get_facts:
-        hostname: "{{ ansible_host }}"
-        username: "{{ napalm_username }}"
-        password: "{{ napalm_password }}"
-        dev_os: "{{ ansible_network_os }}"
-        filter:
-          - facts
-          - interfaces
-          - interfaces_ip
-        optional_args:
-          global_delay_factor: 2
-      register: napalm_result
+    # Fail fast (before touching any device) if the execution environment
+    # can't compile it - main.py needs it.
+    - name: Build the required C extension
+      command: python3 {{ playbook_dir }}/../scripts/build_ext.py
+      changed_when: false
 
-    - name: Write this host's facts and interface data to a JSON file
+- name: Gather show-command output from all inventory devices
+  hosts: network_devices
+  gather_facts: no
+  # SSH connection settings live in group_vars/network_devices.yml (not
+  # play vars), so the tasks delegated to localhost below don't inherit them.
+  tasks:
+    - name: Work out which commands this platform needs
+      command: python3 {{ playbook_dir }}/../scripts/commands.py {{ ansible_network_os }}
+      delegate_to: localhost
+      changed_when: false
+      register: command_list
+
+    - name: Run each show command
+      ansible.builtin.raw: "{{ item }}"
+      loop: "{{ command_list.stdout | from_json }}"
+      register: cli_output
+      changed_when: false
+      # A feature's command failing (e.g. no crypto on this box) shouldn't
+      # stop the core data from being collected.
+      failed_when: false
+
+    - name: Write this host's raw output to a JSON file
       copy:
         dest: "{{ playbook_dir }}/../output/facts/{{ inventory_hostname }}.json"
         content: "{{ node_record | to_nice_json }}"
+      delegate_to: localhost
       vars:
         node_record:
           inventory_name: "{{ inventory_hostname }}"
-          hostname: "{{ napalm_result.ansible_facts.napalm_hostname | default(inventory_hostname) }}"
-          interfaces: "{{ napalm_result.ansible_facts.napalm_interfaces | default({}) }}"
-          interfaces_ip: "{{ napalm_result.ansible_facts.napalm_interfaces_ip | default({}) }}"
+          platform: "{{ ansible_network_os }}"
+          # {command: output} for every command that succeeded
+          cli: >-
+            {{ dict(cli_output.results | selectattr('rc', 'equalto', 0) | map(attribute='item')
+                    | zip(cli_output.results | selectattr('rc', 'equalto', 0) | map(attribute='stdout'))) }}
 
 - name: Push all gathered facts to artifact server
   hosts: artifact_server

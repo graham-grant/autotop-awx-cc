@@ -1,6 +1,8 @@
-# Credentials are pulled from environment variables rather than committed
-# here. Before running the playbook:
-#   export NAPALM_USERNAME=admin
-#   export NAPALM_PASSWORD=secret
-napalm_username: "{{ lookup('env', 'NAPALM_USERNAME') }}"
-napalm_password: "{{ lookup('env', 'NAPALM_PASSWORD') }}"
+# Device SSH credentials are pulled from environment variables rather than
+# committed here (in AWX, attach a Machine/Network credential or set these
+# in the job's environment). Before running the playbook:
+#   export NET_USERNAME=admin
+#   export NET_PASSWORD=secret
+# The old NAPALM_USERNAME / NAPALM_PASSWORD names still work as a fallback.
+net_username: "{{ lookup('env', 'NET_USERNAME') or lookup('env', 'NAPALM_USERNAME') }}"
+net_password: "{{ lookup('env', 'NET_PASSWORD') or lookup('env', 'NAPALM_PASSWORD') }}"

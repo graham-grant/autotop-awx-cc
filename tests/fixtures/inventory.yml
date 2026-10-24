@@ -1,0 +1,13 @@
+# Sample inventory used by the tests (no real devices).
+all:
+  children:
+    network_devices:
+      vars:
+        ansible_network_os: ios
+      hosts:
+        hq: {}
+        core1: {}
+        core2: {}
+        branch1: {}
+        branch2: {}
+        branch3: {}

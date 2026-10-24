@@ -1,0 +1,11 @@
+# Plain SSH to the devices: ansible.builtin.raw sends each show command as
+# an SSH exec request, so no Python on the device and no network_cli /
+# netcommon collection is needed. Password auth uses sshpass on the
+# controller (present in the standard AWX execution environment); key auth
+# works too - drop ansible_password and set ansible_ssh_private_key_file.
+ansible_connection: ssh
+ansible_user: "{{ net_username }}"
+ansible_password: "{{ net_password }}"
+# Older IOS images only offer legacy key exchange / host key algorithms;
+# uncomment and adjust if SSH negotiation fails:
+# ansible_ssh_common_args: "-o KexAlgorithms=+diffie-hellman-group14-sha1 -o HostKeyAlgorithms=+ssh-rsa"
