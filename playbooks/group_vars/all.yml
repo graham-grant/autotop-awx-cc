@@ -1,8 +1,15 @@
-# Device SSH credentials are pulled from environment variables rather than
-# committed here (in AWX, attach a Machine/Network credential or set these
-# in the job's environment). Before running the playbook:
+# Device credentials come from the job's environment, never from this repo.
+#
+# In AWX: attach a credential of the built-in "Network" type to the job
+# template. It injects ANSIBLE_NET_USERNAME / ANSIBLE_NET_PASSWORD (and
+# ANSIBLE_NET_AUTH_PASS for an enable secret, if you fill in "Authorize
+# password"). No custom credential type is needed.
+#
+# Running by hand:
 #   export NET_USERNAME=admin
 #   export NET_PASSWORD=secret
-# The old NAPALM_USERNAME / NAPALM_PASSWORD names still work as a fallback.
-net_username: "{{ lookup('env', 'NET_USERNAME') or lookup('env', 'NAPALM_USERNAME') }}"
-net_password: "{{ lookup('env', 'NET_PASSWORD') or lookup('env', 'NAPALM_PASSWORD') }}"
+#
+# First match wins; NAPALM_* is still accepted from the old custom type.
+net_username: "{{ lookup('env', 'NET_USERNAME') or lookup('env', 'ANSIBLE_NET_USERNAME') or lookup('env', 'NAPALM_USERNAME') }}"
+net_password: "{{ lookup('env', 'NET_PASSWORD') or lookup('env', 'ANSIBLE_NET_PASSWORD') or lookup('env', 'NAPALM_PASSWORD') }}"
+net_enable_password: "{{ lookup('env', 'NET_ENABLE_PASSWORD') or lookup('env', 'ANSIBLE_NET_AUTH_PASS') }}"

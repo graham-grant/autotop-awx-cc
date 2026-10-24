@@ -43,11 +43,22 @@ class CliSessionTest(unittest.TestCase):
                 session().open()
 
 
+NO_CREDS = {v: "" for v in ("NET_USERNAME", "NET_PASSWORD", "ANSIBLE_NET_USERNAME",
+                             "ANSIBLE_NET_PASSWORD", "NAPALM_USERNAME", "NAPALM_PASSWORD")}
+
+
 class CollectTest(unittest.TestCase):
-    def test_collect_uses_napalm_env_fallback(self):
+    def test_no_credentials_is_a_clear_error(self):
         import collect
-        env = {"FAKE_SSH_MODE": "inband", "NAPALM_USERNAME": "admin", "NAPALM_PASSWORD": "secret",
-               "NET_USERNAME": "", "NET_PASSWORD": ""}
+        from sshcli import CliError
+        with mock.patch.dict(os.environ, NO_CREDS):
+            with self.assertRaisesRegex(CliError, "Network' credential"):
+                collect.collect("r1", "sw", "ios")
+
+    def test_collect_uses_awx_network_credential_env(self):
+        import collect
+        env = {**NO_CREDS, "FAKE_SSH_MODE": "inband",
+               "ANSIBLE_NET_USERNAME": "admin", "ANSIBLE_NET_PASSWORD": "secret"}
         real = CliSession.__init__
 
         def fake_init(self, *a, **kw):

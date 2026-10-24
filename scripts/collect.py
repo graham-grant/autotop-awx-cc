@@ -12,10 +12,13 @@ straight from the environment rather than through Ansible's connection
 variables, and answering password, in-session login, pager and "enable"
 prompts. On a failed login it prints what the device actually said.
 
-Credentials come from the environment, never the command line:
-  NET_USERNAME / NET_PASSWORD  (falling back to NAPALM_USERNAME /
-  NAPALM_PASSWORD, as injected by the old NAPALM credential type)
-  NET_ENABLE_PASSWORD          optional, used if the device lands at ">"
+Credentials come from the environment, never the command line, first
+match wins:
+  username:  NET_USERNAME, ANSIBLE_NET_USERNAME, NAPALM_USERNAME
+  password:  NET_PASSWORD, ANSIBLE_NET_PASSWORD, NAPALM_PASSWORD
+  enable:    NET_ENABLE_PASSWORD, ANSIBLE_NET_AUTH_PASS  (optional, used if
+             the device lands at a ">" prompt)
+ANSIBLE_NET_* are what AWX's built-in "Network" credential type injects.
 
 Usage:
   collect.py --name NAME --host ADDR --platform OS --out FILE
@@ -38,6 +41,11 @@ import netparse
 from sshcli import AuthError, CliError, CliSession
 
 
+USERNAME_VARS = ("NET_USERNAME", "ANSIBLE_NET_USERNAME", "NAPALM_USERNAME")
+PASSWORD_VARS = ("NET_PASSWORD", "ANSIBLE_NET_PASSWORD", "NAPALM_PASSWORD")
+ENABLE_VARS = ("NET_ENABLE_PASSWORD", "ANSIBLE_NET_AUTH_PASS")
+
+
 def _env(*names):
     for n in names:
         if os.environ.get(n):
@@ -46,15 +54,16 @@ def _env(*names):
 
 
 def collect(name, host, platform, port=22, ssh_args=(), timeout=30.0, command_timeout=120.0):
-    username = _env("NET_USERNAME", "NAPALM_USERNAME")
-    password = _env("NET_PASSWORD", "NAPALM_PASSWORD")
+    username = _env(*USERNAME_VARS)
+    password = _env(*PASSWORD_VARS)
     if not username or not password:
-        raise CliError("no credentials: set NET_USERNAME/NET_PASSWORD "
-                       "(or NAPALM_USERNAME/NAPALM_PASSWORD)")
+        raise CliError("no credentials found in the environment. In AWX, attach a "
+                       "'Network' credential to the job template; otherwise set "
+                       "NET_USERNAME/NET_PASSWORD")
     print(f"{name}: connecting to {host}:{port} as {username!r}")
     cli = {}
     with CliSession(host, username, password, port=port,
-                    enable_password=_env("NET_ENABLE_PASSWORD"),
+                    enable_password=_env(*ENABLE_VARS),
                     ssh_args=list(ssh_args), timeout=timeout,
                     command_timeout=command_timeout) as session:
         session.disable_paging(netparse.paging_commands(platform))
