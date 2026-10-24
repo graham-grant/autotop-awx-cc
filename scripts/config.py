@@ -87,3 +87,14 @@ INTF_ABBREVIATIONS = [
 # showing the cell's id instead of staying blank. U+200B isn't treated as
 # whitespace, so it survives and renders as an effectively invisible label.
 BLANK_LABEL = "\u200b"
+
+# ---------------------------------------------------------------------------
+# Feature plugins (scripts/features/) - drawn on their own draw.io layers
+# on top of the physical diagram. Order here = layer stacking order.
+# None enables every feature module found.
+# ---------------------------------------------------------------------------
+ENABLED_FEATURES = ["ipsec"]
+
+# Per-feature overrides of each feature's SETTINGS defaults, e.g.
+#   FEATURE_SETTINGS = {"ipsec": {"up_color": "#0050EF", "lane_spacing": 12}}
+FEATURE_SETTINGS = {}

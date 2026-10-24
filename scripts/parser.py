@@ -1,17 +1,18 @@
 """
-Reads the per-host JSON files written by the Ansible playbook and derives
+Reads the per-host JSON files written by the Ansible playbook (raw CLI
+output, normalized by netparse) and derives
 links from directly-connected subnets. Nothing here knows about drawio,
 pathfinding, or rendering. Node positions are no longer read here - see
 drawio_position_loader.py, which reads them from template.drawio instead.
 """
+import ipaddress
 import json
+from collections import defaultdict
 from pathlib import Path
 
-import yaml
-
+import inventory
+import netparse
 from config import EXCLUDED_NETWORKS
-import ipaddress
-from collections import defaultdict
 
 
 def load_icons(inventory_path):
@@ -24,32 +25,21 @@ def load_icons(inventory_path):
     `icon:` key, with the host-level value winning if both are set.
     Hosts with no icon set anywhere are simply absent from the result.
     """
-    with open(inventory_path) as f:
-        tree = yaml.safe_load(f) or {}
-
-    icons = {}
-
-    def walk(group, inherited_icon):
-        group_vars = group.get("vars") or {}
-        icon = group_vars.get("icon", inherited_icon)
-
-        for host_name, host_vars in (group.get("hosts") or {}).items():
-            host_vars = host_vars or {}
-            icons[host_name] = host_vars.get("icon", icon)
-
-        for child in (group.get("children") or {}).values():
-            walk(child, icon)
-
-    walk(tree.get("all") or {}, None)
-    return {name: icon for name, icon in icons.items() if icon}
+    return {name: hv["icon"] for name, hv in inventory.host_vars(inventory_path).items()
+            if hv.get("icon")}
 
 
 def load_nodes(facts_dir):
-    """Read every *.json file in facts_dir into a list of node dicts."""
+    """Read every *.json file in facts_dir into a list of node dicts.
+
+    Raw-CLI records from the playbook are normalized into the NAPALM-shaped
+    schema (hostname / interfaces / interfaces_ip) by netparse; records
+    already in that shape pass through unchanged.
+    """
     nodes = []
     for path in sorted(Path(facts_dir).glob("*.json")):
         with open(path) as f:
-            nodes.append(json.load(f))
+            nodes.append(netparse.normalize(json.load(f)))
     return nodes
 
 

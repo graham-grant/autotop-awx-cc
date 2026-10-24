@@ -1,0 +1,8 @@
+<mxfile><diagram name="Positions"><mxGraphModel><root><mxCell id="0" /><mxCell id="1" parent="0" />
+<mxCell id="2" value="hq" style="rounded=0;" vertex="1" parent="1"><mxGeometry x="285" y="0" width="230" height="42" as="geometry" /></mxCell>
+<mxCell id="3" value="core1" style="rounded=0;" vertex="1" parent="1"><mxGeometry x="285" y="200" width="230" height="42" as="geometry" /></mxCell>
+<mxCell id="4" value="core2" style="rounded=0;" vertex="1" parent="1"><mxGeometry x="685" y="200" width="230" height="42" as="geometry" /></mxCell>
+<mxCell id="5" value="branch1" style="rounded=0;" vertex="1" parent="1"><mxGeometry x="585" y="420" width="230" height="42" as="geometry" /></mxCell>
+<mxCell id="6" value="branch2" style="rounded=0;" vertex="1" parent="1"><mxGeometry x="885" y="420" width="230" height="42" as="geometry" /></mxCell>
+<mxCell id="7" value="branch3" style="rounded=0;" vertex="1" parent="1"><mxGeometry x="85" y="420" width="230" height="42" as="geometry" /></mxCell>
+</root></mxGraphModel></diagram></mxfile>
