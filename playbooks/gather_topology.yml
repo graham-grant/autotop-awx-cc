@@ -18,7 +18,7 @@
 #   export NET_PASSWORD=secret
 #   ansible-playbook -i inventory.yml playbooks/gather_topology.yml
 
-- name: Prepare output directory and build the C extension
+- name: Prepare output directory and check the C extension
   hosts: localhost
   connection: local
   gather_facts: no
@@ -29,10 +29,13 @@
         state: directory
         mode: "0755"
 
-    # Fail fast (before touching any device) if the execution environment
-    # can't compile it - main.py needs it.
-    - name: Build the required C extension
-      command: python3 {{ playbook_dir }}/../scripts/build_ext.py
+    # The prebuilt scripts/_hanan.abi3.so is used as-is (no compiler
+    # needed). Loading pathfinder here fails fast, before touching any
+    # device, if it can't be loaded on this execution environment.
+    - name: Check the C extension loads
+      command: python3 -c "import pathfinder; print(pathfinder._hanan.__file__)"
+      args:
+        chdir: "{{ playbook_dir }}/../scripts"
       changed_when: false
 
 - name: Gather show-command output from all inventory devices

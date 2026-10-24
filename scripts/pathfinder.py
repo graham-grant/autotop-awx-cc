@@ -33,19 +33,33 @@ from config import HANAN_BUFFER, HANAN_TURN_PENALTY, HANAN_MARGIN, HANAN_PERIMET
 
 
 def _load_c_extension():
-    """The A* search runs in the required C extension csrc/_hanan.c.
-    It's compiled on first use (and whenever the source is newer than the
-    built module) by build_ext.py - stdlib only, but it does need a C
-    compiler and Python.h on this machine."""
+    """The A* search runs in the required C extension csrc/_hanan.c. A
+    prebuilt, stable-ABI copy (scripts/_hanan.abi3.so) is committed, so
+    normally this just imports it - no compiler needed. Only if that copy
+    is missing or was built from different source does it try to compile
+    (build_ext.py: stdlib only, but needs gcc + Python.h); if a stale copy
+    exists and compiling isn't possible, it warns and uses the stale copy.
+    """
     import build_ext
-    try:
-        if build_ext.is_stale():
+    if not build_ext.is_current():
+        have_old = build_ext.TARGET.exists()
+        try:
             build_ext.build()
+        except build_ext.BuildError as e:
+            if not have_old:
+                raise RuntimeError(
+                    f"The required C extension {build_ext.TARGET.name} is missing and "
+                    f"couldn't be built: {e}") from e
+            print(f"WARNING: {build_ext.TARGET.name} was built from an older "
+                  f"csrc/_hanan.c and can't be rebuilt here ({e.__class__.__name__}); "
+                  f"using it anyway. Rebuild and commit it: python3 scripts/build_ext.py")
+    try:
         import _hanan
-    except (build_ext.BuildError, ImportError) as e:
+    except ImportError as e:
         raise RuntimeError(
-            f"The required C extension _hanan couldn't be built or loaded: {e}\n"
-            f"Run `python3 scripts/build_ext.py` to see the full error."
+            f"The required C extension couldn't be loaded: {e}\n"
+            f"The committed {build_ext.TARGET.name} is built for Linux x86_64 and "
+            f"CPython 3.9+; on another platform run `python3 scripts/build_ext.py`."
         ) from e
     return _hanan
 

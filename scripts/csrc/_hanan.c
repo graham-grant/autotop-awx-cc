@@ -6,8 +6,14 @@
  * and floating-point operation order - so both produce identical paths.
  * tests/test_hanan_c.py checks that.
  *
- * Built with the standard library only: scripts/build_ext.py drives the C
- * compiler using the flags CPython was itself built with (sysconfig).
+ * Written against CPython's stable ABI (Py_LIMITED_API, Python 3.9+), so
+ * one compiled file - _hanan.abi3.so - loads on every CPython from 3.9 up
+ * on the same OS/architecture. That's what lets a prebuilt copy be
+ * committed and used on AWX execution environments that have no compiler
+ * or Python headers. scripts/build_ext.py (standard library only) builds
+ * it and stamps the source's SHA-256 into the module as
+ * __source_sha256__, so pathfinder.py can tell a stale binary from a
+ * current one.
  *
  * astar(xs, ys, blocked, penalty, segs, starts, goals,
  *       buffer, turn_penalty, affinity_penalty, soft_penalty, hard_buffer)
@@ -22,6 +28,7 @@
  * Returns a list of (i, j) from a start to a goal, or None.
  */
 #define PY_SSIZE_T_CLEAN
+#define Py_LIMITED_API 0x03090000
 #include <Python.h>
 #include <math.h>
 #include <stdlib.h>
@@ -102,73 +109,76 @@ static HeapItem heap_pop(Heap *h)
     return ret;
 }
 
+/* Stable-ABI sequence access: PySequence_Fast's macros aren't part of it. */
+
 static double *read_doubles(PyObject *seq, Py_ssize_t *n_out)
 {
-    PyObject *fast = PySequence_Fast(seq, "expected a sequence of floats");
-    if (!fast) return NULL;
-    Py_ssize_t n = PySequence_Fast_GET_SIZE(fast);
+    Py_ssize_t n = PySequence_Size(seq);
+    if (n < 0) return NULL;
     double *out = malloc((size_t)(n ? n : 1) * sizeof(double));
-    if (!out) { Py_DECREF(fast); PyErr_NoMemory(); return NULL; }
+    if (!out) { PyErr_NoMemory(); return NULL; }
     for (Py_ssize_t k = 0; k < n; k++) {
-        out[k] = PyFloat_AsDouble(PySequence_Fast_GET_ITEM(fast, k));
-        if (out[k] == -1.0 && PyErr_Occurred()) { free(out); Py_DECREF(fast); return NULL; }
+        PyObject *item = PySequence_GetItem(seq, k);
+        if (!item) { free(out); return NULL; }
+        out[k] = PyFloat_AsDouble(item);
+        Py_DECREF(item);
+        if (out[k] == -1.0 && PyErr_Occurred()) { free(out); return NULL; }
     }
-    Py_DECREF(fast);
     *n_out = n;
     return out;
 }
 
 static int *read_pairs(PyObject *seq, Py_ssize_t *n_out)
 {
-    PyObject *fast = PySequence_Fast(seq, "expected a sequence of (i, j)");
-    if (!fast) return NULL;
-    Py_ssize_t n = PySequence_Fast_GET_SIZE(fast);
+    Py_ssize_t n = PySequence_Size(seq);
+    if (n < 0) return NULL;
     int *out = malloc((size_t)(n ? n : 1) * 2 * sizeof(int));
-    if (!out) { Py_DECREF(fast); PyErr_NoMemory(); return NULL; }
+    if (!out) { PyErr_NoMemory(); return NULL; }
     for (Py_ssize_t k = 0; k < n; k++) {
-        int i, j;
-        if (!PyArg_ParseTuple(PySequence_Fast_GET_ITEM(fast, k), "ii", &i, &j)) {
-            free(out); Py_DECREF(fast); return NULL;
-        }
-        out[2 * k] = i;
-        out[2 * k + 1] = j;
+        PyObject *item = PySequence_GetItem(seq, k);
+        int ok = item && PyArg_ParseTuple(item, "ii", &out[2 * k], &out[2 * k + 1]);
+        Py_XDECREF(item);
+        if (!ok) { free(out); return NULL; }
     }
-    Py_DECREF(fast);
     *n_out = n;
     return out;
 }
 
 static Seg *read_segs(PyObject *seq, Py_ssize_t *n_out)
 {
-    PyObject *fast = PySequence_Fast(seq, "expected a sequence of segments");
-    if (!fast) return NULL;
-    Py_ssize_t n = PySequence_Fast_GET_SIZE(fast);
+    Py_ssize_t n = PySequence_Size(seq);
+    if (n < 0) return NULL;
     Seg *out = malloc((size_t)(n ? n : 1) * sizeof(Seg));
-    if (!out) { Py_DECREF(fast); PyErr_NoMemory(); return NULL; }
+    if (!out) { PyErr_NoMemory(); return NULL; }
     for (Py_ssize_t k = 0; k < n; k++) {
-        int hz, same;
-        if (!PyArg_ParseTuple(PySequence_Fast_GET_ITEM(fast, k), "pdddp",
-                              &hz, &out[k].fixed, &out[k].lo, &out[k].hi, &same)) {
-            free(out); Py_DECREF(fast); return NULL;
-        }
+        int hz = 0, same = 0;
+        PyObject *item = PySequence_GetItem(seq, k);
+        int ok = item && PyArg_ParseTuple(item, "pdddp", &hz, &out[k].fixed,
+                                          &out[k].lo, &out[k].hi, &same);
+        Py_XDECREF(item);
+        if (!ok) { free(out); return NULL; }
         out[k].horizontal = hz;
         out[k].same_target = same;
     }
-    Py_DECREF(fast);
     *n_out = n;
     return out;
 }
 
 static PyObject *astar(PyObject *self, PyObject *args)
 {
-    PyObject *xs_o, *ys_o, *pen_o, *segs_o, *starts_o, *goals_o;
-    Py_buffer blocked;
+    PyObject *xs_o, *ys_o, *blk_o, *pen_o, *segs_o, *starts_o, *goals_o;
+    char *blk_buf;
+    Py_ssize_t blk_len;
     double buffer, turn_penalty, affinity, soft_penalty;
     int hard_buffer;
 
-    if (!PyArg_ParseTuple(args, "OOy*OOOOddddp", &xs_o, &ys_o, &blocked, &pen_o, &segs_o,
+    if (!PyArg_ParseTuple(args, "OOSOOOOddddp", &xs_o, &ys_o, &blk_o, &pen_o, &segs_o,
                           &starts_o, &goals_o, &buffer, &turn_penalty, &affinity,
                           &soft_penalty, &hard_buffer))
+        return NULL;
+    /* Not "y#": how '#' lengths are passed differs across the stable-ABI
+     * versions this module targets, so read the bytes object directly. */
+    if (PyBytes_AsStringAndSize(blk_o, &blk_buf, &blk_len) < 0)
         return NULL;
 
     PyObject *result = NULL;
@@ -183,7 +193,7 @@ static PyObject *astar(PyObject *self, PyObject *args)
         !(pen = read_doubles(pen_o, &npen)) || !(segs = read_segs(segs_o, &nseg)) ||
         !(starts = read_pairs(starts_o, &nstart)) || !(goals = read_pairs(goals_o, &ngoal)))
         goto done;
-    if (blocked.len != nx * ny || npen != nx * ny) {
+    if (blk_len != nx * ny || npen != nx * ny) {
         PyErr_SetString(PyExc_ValueError, "blocked/penalty must have len(xs)*len(ys) entries");
         goto done;
     }
@@ -203,7 +213,7 @@ static PyObject *astar(PyObject *self, PyObject *args)
         }
         goal_mask[gi * ny + gj] = 1;
     }
-    const unsigned char *blk = (const unsigned char *)blocked.buf;
+    const unsigned char *blk = (const unsigned char *)blk_buf;
 
 #define STATE(i, j, d) ((((Py_ssize_t)(i)) * ny + (j)) * 3 + (d))
 #define HEUR(i, j, out) do {                                                 \
@@ -247,7 +257,7 @@ static PyObject *astar(PyObject *self, PyObject *args)
                 Py_ssize_t cell = s / 3;
                 PyObject *pt = Py_BuildValue("(nn)", cell / ny, cell % ny);
                 if (!pt) { Py_CLEAR(result); goto done; }
-                PyList_SET_ITEM(result, pos, pt);
+                PyList_SetItem(result, pos, pt);  /* steals pt */
             }
             goto done;
         }
@@ -307,7 +317,6 @@ static PyObject *astar(PyObject *self, PyObject *args)
     Py_INCREF(result);
 
 done:
-    PyBuffer_Release(&blocked);
     free(xs); free(ys); free(pen); free(segs); free(starts); free(goals);
     free(best_g); free(came_from); free(goal_mask); free(heap.items);
     return result;
@@ -323,7 +332,22 @@ static struct PyModuleDef module = {
     "C implementation of pathfinder's Hanan-grid A* search.", -1, methods,
 };
 
+/* Same hash as a findable plain string, so build_ext.py can check a binary
+ * is current without importing it. */
+#ifdef HANAN_SOURCE_STAMP
+__attribute__((used)) static const char hanan_source_stamp[] = HANAN_SOURCE_STAMP;
+#endif
+
+#ifndef HANAN_SOURCE_SHA256
+#define HANAN_SOURCE_SHA256 "unknown"
+#endif
+
 PyMODINIT_FUNC PyInit__hanan(void)
 {
-    return PyModule_Create(&module);
+    PyObject *m = PyModule_Create(&module);
+    if (m && PyModule_AddStringConstant(m, "__source_sha256__", HANAN_SOURCE_SHA256) < 0) {
+        Py_DECREF(m);
+        return NULL;
+    }
+    return m;
 }
