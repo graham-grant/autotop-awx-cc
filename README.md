@@ -22,7 +22,8 @@ The diagram-building side of the project lives in `scripts/`:
 - `csrc/_hanan.c` + `_hanan.abi3.so` + `build_ext.py` — the A* search in C, its prebuilt binary, and the stdlib-only build script
 - `renderer.py` — turns routed nodes/links into draw.io XML, with IP/interface labels and status dots
 - `features/` — protocol feature plugins (`ipsec.py`), plus shared overlay geometry (`bundling.py`)
-- `commands.py` — tells the playbook which show commands to run per platform
+- `collect.py` / `sshcli.py` — collects a device's show output over one interactive SSH session (system `ssh` + pty)
+- `commands.py` — the show commands to run per platform (core + enabled features)
 - `miniyaml.py` / `inventory.py` — a small YAML reader (replaces PyYAML) and the shared inventory loader
 
 ## Layout
@@ -35,14 +36,19 @@ sit next to `gather_topology.yml` for `net_username`/`net_password` and the
 
 ## How it works
 
-1. `playbooks/gather_topology.yml` connects to every host in the
-   `network_devices` group over plain SSH and runs a list of show commands
-   with `ansible.builtin.raw` — no NAPALM, no network collections. The
-   list comes from `scripts/commands.py`: the core commands for the host's
-   platform (`show version`, `show interfaces`, `show ip interface` on
-   IOS/IOS-XE) plus whatever each enabled feature needs. The raw output is
-   written, one JSON file per host, to `output/facts/`:
-   `{"inventory_name", "platform", "cli": {command: output}}`.
+1. `playbooks/gather_topology.yml` runs `scripts/collect.py` on the
+   controller once per host in the `network_devices` group. It opens one
+   interactive SSH session per device, using the system `ssh` client
+   driven through a pseudo-terminal (`scripts/sshcli.py`, stdlib only), and
+   runs a list of show commands, the way NAPALM did — no NAPALM, no
+   network collections, no `sshpass`. It answers password prompts, in-session
+   `User Name:`/`Password:` logins, pagers and (with `net_enable_password`)
+   `enable`. On a failed login, it prints what the device actually replied.
+   The command list comes from `scripts/commands.py`: the core
+   commands for the host's platform (`show version`, `show interfaces`,
+   `show ip interface` on IOS/IOS-XE) plus whatever each enabled feature
+   needs. The raw output is written, one JSON file per host, to
+   `output/facts/`: `{"inventory_name", "platform", "cli": {command: output}}`.
 2. `scripts/netparse/` parses that output into the same schema NAPALM used
    to produce (`hostname`, `interfaces`, `interfaces_ip`), so the rest of
    the pipeline is unchanged. JSON from the older NAPALM-based playbook
@@ -204,10 +210,12 @@ export NET_PASSWORD=secret
 
 Edit `inventory.yml` with your actual devices — each host needs
 `ansible_host` and `ansible_network_os` (`ios` / `iosxe` are supported by
-`netparse` today). Devices are reached over SSH; password auth uses
-`sshpass` on the controller (already in standard AWX execution
-environments). Connection settings are in
-`playbooks/group_vars/network_devices.yml`.
+`netparse` today). Credentials are read from `NET_USERNAME` /
+`NET_PASSWORD`, or from `NAPALM_USERNAME` / `NAPALM_PASSWORD`, so an existing
+AWX custom credential type that injects those keeps working unchanged.
+An optional enable secret and extra `ssh` options (e.g. legacy key exchange)
+are set in `playbooks/group_vars/network_devices.yml`. The controller needs
+the OpenSSH client, which every AWX execution environment includes.
 
 ## Tests
 

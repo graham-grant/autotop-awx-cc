@@ -39,6 +39,10 @@ class IosParserTest(unittest.TestCase):
         self.assertEqual(out["Vlan10"]["ipv4"], {"10.1.1.1": {"prefix_length": 24},
                                                  "10.2.2.1": {"prefix_length": 24}})
 
+    def test_c8000v_show_version_hostname(self):
+        text = (support.FIXTURES / "cli" / "c8000v_show_version.txt").read_text()
+        self.assertEqual(ios.parse_show_version(text), "AT-8K-1")
+
     def test_legacy_napalm_records_pass_through(self):
         legacy = {"inventory_name": "x", "hostname": "x",
                   "interfaces": {"Gi1": {"is_up": True}}, "interfaces_ip": {}}
