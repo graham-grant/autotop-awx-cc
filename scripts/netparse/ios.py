@@ -7,6 +7,7 @@ from __future__ import annotations
 import re
 
 CORE_COMMANDS = ["show version", "show interfaces", "show ip interface"]
+PAGING_COMMANDS = ["terminal length 0"]
 
 # "GigabitEthernet0/1 is up, line protocol is up (connected)"
 # "Vlan10 is administratively down, line protocol is down"

@@ -36,6 +36,16 @@ def platform_key(network_os: str | None) -> str:
     return _ALIASES.get((network_os or "").lower(), (network_os or "").lower())
 
 
+# Tried in order after login; an unknown one just errors harmlessly, and
+# pager prompts are answered anyway (sshcli), so this only saves time.
+_DEFAULT_PAGING = ["terminal length 0", "terminal datadump"]
+
+
+def paging_commands(network_os: str) -> list[str]:
+    driver = _DRIVERS.get(platform_key(network_os))
+    return list(getattr(driver, "PAGING_COMMANDS", _DEFAULT_PAGING))
+
+
 def core_commands(network_os: str) -> list[str]:
     driver = _DRIVERS.get(platform_key(network_os))
     return list(driver.CORE_COMMANDS) if driver else []

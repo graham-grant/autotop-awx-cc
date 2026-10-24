@@ -1,7 +1,8 @@
 ---
 # Gathers raw show-command output from every host in the `network_devices`
-# group over plain SSH (ansible.builtin.raw - no NAPALM, no network
-# collections, nothing to pip install), then writes one JSON file per host
+# group over SSH (scripts/collect.py - stdlib Python + the system ssh
+# client; no NAPALM, no network collections, nothing to pip install), then
+# writes one JSON file per host
 # to output/facts/. scripts/main.py parses that output (scripts/netparse/)
 # into the NAPALM-style schema the rest of the project uses and draws the
 # drawio diagram. Adjacency is derived from directly-connected subnets (two
@@ -40,38 +41,30 @@
 
 - name: Gather show-command output from all inventory devices
   hosts: network_devices
+  # scripts/collect.py does the SSH itself, from the controller: it drives
+  # the system ssh client through a pty (stdlib only) so it can answer
+  # in-session "User Name:/Password:" prompts, pagers and "enable", which
+  # ansible.builtin.raw can't. So Ansible itself never connects to the device.
+  connection: local
   gather_facts: no
-  # SSH connection settings live in group_vars/network_devices.yml (not
-  # play vars), so the tasks delegated to localhost below don't inherit them.
+  vars:
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
   tasks:
-    - name: Work out which commands this platform needs
-      command: python3 {{ playbook_dir }}/../scripts/commands.py {{ ansible_network_os }}
-      delegate_to: localhost
+    - name: Collect show-command output over SSH
+      command: >-
+        python3 {{ playbook_dir }}/../scripts/collect.py
+        --name {{ inventory_hostname }}
+        --host {{ ansible_host | default(inventory_hostname) }}
+        --port {{ ansible_port | default(22) }}
+        --platform {{ ansible_network_os }}
+        --out {{ playbook_dir }}/../output/facts/{{ inventory_hostname }}.json
+        --ssh-args {{ net_ssh_args | default('') | quote }}
+      # Credentials go to collect.py through the environment, never argv.
+      environment:
+        NET_USERNAME: "{{ net_username }}"
+        NET_PASSWORD: "{{ net_password }}"
+        NET_ENABLE_PASSWORD: "{{ net_enable_password | default('') }}"
       changed_when: false
-      register: command_list
-
-    - name: Run each show command
-      ansible.builtin.raw: "{{ item }}"
-      loop: "{{ command_list.stdout | from_json }}"
-      register: cli_output
-      changed_when: false
-      # A feature's command failing (e.g. no crypto on this box) shouldn't
-      # stop the core data from being collected.
-      failed_when: false
-
-    - name: Write this host's raw output to a JSON file
-      copy:
-        dest: "{{ playbook_dir }}/../output/facts/{{ inventory_hostname }}.json"
-        content: "{{ node_record | to_nice_json }}"
-      delegate_to: localhost
-      vars:
-        node_record:
-          inventory_name: "{{ inventory_hostname }}"
-          platform: "{{ ansible_network_os }}"
-          # {command: output} for every command that succeeded
-          cli: >-
-            {{ dict(cli_output.results | selectattr('rc', 'equalto', 0) | map(attribute='item')
-                    | zip(cli_output.results | selectattr('rc', 'equalto', 0) | map(attribute='stdout'))) }}
 
 - name: Push all gathered facts to artifact server
   hosts: artifact_server
