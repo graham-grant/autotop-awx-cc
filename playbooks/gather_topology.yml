@@ -50,6 +50,19 @@
   vars:
     ansible_python_interpreter: "{{ ansible_playbook_python }}"
   tasks:
+    - name: Check device credentials were provided
+      assert:
+        that:
+          - net_username | length > 0
+          - net_password | length > 0
+        fail_msg: >-
+          No device credentials in the job environment. In AWX, attach a
+          credential of the built-in "Network" type to this job template
+          (it sets ANSIBLE_NET_USERNAME / ANSIBLE_NET_PASSWORD). Running by
+          hand: export NET_USERNAME and NET_PASSWORD.
+        quiet: true
+      run_once: true
+
     - name: Collect show-command output over SSH
       command: >-
         python3 {{ playbook_dir }}/../scripts/collect.py
@@ -63,7 +76,7 @@
       environment:
         NET_USERNAME: "{{ net_username }}"
         NET_PASSWORD: "{{ net_password }}"
-        NET_ENABLE_PASSWORD: "{{ net_enable_password | default('') }}"
+        NET_ENABLE_PASSWORD: "{{ net_enable_password }}"
       changed_when: false
 
 - name: Push all gathered facts to artifact server

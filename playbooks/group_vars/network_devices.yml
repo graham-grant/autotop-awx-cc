@@ -1,9 +1,6 @@
 # Settings scripts/collect.py uses to reach the devices (it runs on the
 # controller and does the SSH itself - Ansible doesn't connect to them).
-# Credentials come from group_vars/all.yml (NET_* / NAPALM_* env vars).
-
-# Optional enable secret, for devices that log in at a ">" prompt:
-# net_enable_password: "{{ lookup('env', 'NET_ENABLE_PASSWORD') }}"
+# Credentials (and the optional enable secret) come from group_vars/all.yml.
 
 # Older images only offer legacy key exchange / host key algorithms;
 # uncomment and adjust if SSH negotiation fails:

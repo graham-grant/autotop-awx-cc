@@ -210,11 +210,17 @@ export NET_PASSWORD=secret
 
 Edit `inventory.yml` with your actual devices — each host needs
 `ansible_host` and `ansible_network_os` (`ios` / `iosxe` are supported by
-`netparse` today). Credentials are read from `NET_USERNAME` /
-`NET_PASSWORD`, or from `NAPALM_USERNAME` / `NAPALM_PASSWORD`, so an existing
-AWX custom credential type that injects those keeps working unchanged.
-An optional enable secret and extra `ssh` options (e.g. legacy key exchange)
-are set in `playbooks/group_vars/network_devices.yml`. The controller needs
+`netparse` today).
+
+Credentials come from the job's environment. **In AWX, attach a credential
+of the built-in "Network" type to the job template.** It injects
+`ANSIBLE_NET_USERNAME` / `ANSIBLE_NET_PASSWORD`, plus `ANSIBLE_NET_AUTH_PASS`
+if you fill in the "Authorize password" field, which is used as the enable
+secret. No custom credential type is needed. When running by hand, export
+`NET_USERNAME` / `NET_PASSWORD`. The old `NAPALM_*` names are still
+accepted. The playbook stops before contacting any device if no credentials
+are found. Extra `ssh` options (e.g. legacy key exchange) go in
+`playbooks/group_vars/network_devices.yml`. The controller needs
 the OpenSSH client, which every AWX execution environment includes.
 
 ## Tests
