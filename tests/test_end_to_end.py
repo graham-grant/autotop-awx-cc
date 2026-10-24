@@ -37,6 +37,7 @@ class EndToEndTest(unittest.TestCase):
                 self.assertIn(cell.get("source"), vertex_ids)
                 self.assertIn(cell.get("target"), vertex_ids)
 
+    @unittest.skipUnless(hasattr(sys, "stdlib_module_names"), "needs Python 3.10+")
     def test_no_third_party_imports(self):
         """Every import under scripts/ resolves to the stdlib or the project."""
         import ast

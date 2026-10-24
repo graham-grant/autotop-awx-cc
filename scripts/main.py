@@ -11,8 +11,8 @@ draw itself onto its own layer. Tunable settings live in config.py.
 
 Runs on a base Python 3 install: no third-party packages. Host JSON is raw
 show-command output normalized by netparse/, inventory.yml is read by
-miniyaml.py, and the A* router's search runs in a C extension that
-build_ext.py compiles on first run (needs gcc + Python headers).
+miniyaml.py, and the A* router's search runs in a C extension that ships
+prebuilt (_hanan.abi3.so, CPython 3.9+ stable ABI) - no compiler needed.
 
 Links are derived from directly-connected subnets: every interface IP
 NAPALM reports is grouped by network, and any subnet shared by exactly two

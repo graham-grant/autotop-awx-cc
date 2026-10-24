@@ -3,6 +3,7 @@ output/facts/*
 Old/
 __pycache__/
 *.pyc
-# built by scripts/build_ext.py
-scripts/_hanan*.so
-scripts/_hanan*.pyd
+# scripts/_hanan.abi3.so is committed on purpose (prebuilt for AWX, which
+# has no compiler); ignore per-interpreter builds and temp files only
+scripts/_hanan.cpython-*.so
+scripts/_hanan*.tmp

@@ -1,7 +1,9 @@
 """The C A* (csrc/_hanan.c) must produce exactly what the pure-Python
 reference (pathfinder.astar_route_py) does."""
 import random
+import re
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import support  # noqa: F401
@@ -32,9 +34,21 @@ def route(edges, centers, sizes, search):
 
 
 class HananCParityTest(unittest.TestCase):
-    def test_extension_loaded(self):
-        self.assertTrue(pathfinder._hanan.__file__.endswith(
-            __import__("sysconfig").get_config_var("EXT_SUFFIX")))
+    def test_prebuilt_binary_loaded_and_current(self):
+        import build_ext
+        self.assertEqual(Path(pathfinder._hanan.__file__).resolve(), build_ext.TARGET)
+        # Fails if csrc/_hanan.c changed without rebuilding/committing the binary
+        self.assertEqual(pathfinder._hanan.__source_sha256__, build_ext.source_sha256())
+        self.assertTrue(build_ext.is_current())
+
+    def test_prebuilt_binary_portable(self):
+        """Needs no glibc newer than 2.17, so it loads on every AWX EE."""
+        import build_ext
+        data = build_ext.TARGET.read_bytes()
+        versions = {tuple(map(int, m.groups()))
+                    for m in re.finditer(rb"GLIBC_(\d+)\.(\d+)", data)}
+        self.assertTrue(versions)
+        self.assertLessEqual(max(versions), (2, 17))
 
     def test_identical_routes(self):
         for seed in range(12):

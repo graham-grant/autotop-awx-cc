@@ -8,9 +8,9 @@ overlays (IPsec tunnels so far) are drawn on top, each on its own draw.io
 layer, by self-contained feature plugins.
 
 **No third-party Python packages.** Everything runs on a base Python 3
-install (3.10+): no NAPALM, no PyYAML, nothing to `pip install`. The only
-extra requirement is a C compiler and the Python headers, for the A*
-router's C extension (see [C extension](#c-extension)).
+install (3.9+): no NAPALM, no PyYAML, nothing to `pip install`, and no
+compiler. The A* router's C extension ships prebuilt (see
+[C extension](#c-extension)).
 
 The diagram-building side of the project lives in `scripts/`:
 
@@ -19,7 +19,7 @@ The diagram-building side of the project lives in `scripts/`:
 - `netparse/` — parses raw show-command output into the NAPALM-style JSON schema (replaces NAPALM)
 - `parser.py` — reads the JSON facts, derives links from subnets
 - `pathfinder.py` — the Hanan-grid A* router that finds each link's actual path
-- `csrc/_hanan.c` + `build_ext.py` — the A* search in C, and its stdlib-only build script
+- `csrc/_hanan.c` + `_hanan.abi3.so` + `build_ext.py` — the A* search in C, its prebuilt binary, and the stdlib-only build script
 - `renderer.py` — turns routed nodes/links into draw.io XML, with IP/interface labels and status dots
 - `features/` — protocol feature plugins (`ipsec.py`), plus shared overlay geometry (`bundling.py`)
 - `commands.py` — tells the playbook which show commands to run per platform
@@ -171,20 +171,33 @@ JSON (see the module docstring).
 
 The A* search at the heart of `pathfinder.py` runs in a CPython C extension
 (`scripts/csrc/_hanan.c`), about 80x faster than the equivalent Python on a
-mid-sized topology. It's required: `build_ext.py` compiles it using only the
-standard library (it asks `sysconfig` for the compiler and flags CPython was
-built with), the playbook builds it before touching any device, and
-`main.py` rebuilds it automatically if it's missing or out of date. The
-build needs `gcc` and the Python headers (`python3-devel` / `python3-dev`)
-— add both to your AWX execution environment image. The pure-Python
-`astar_route_py` is kept as the readable reference, and the tests check the
-two produce identical routes.
+mid-sized topology. It's written against CPython's stable ABI, so one
+compiled file, `scripts/_hanan.abi3.so`, works on every CPython 3.9+ on
+Linux x86_64 (it needs nothing newer than glibc 2.4). That file is
+**prebuilt and committed**, so AWX execution environments need no compiler
+or Python headers. Its build was tested in Rocky Linux 9 with Python 3.9,
+the same base as the stock AWX EE, with no compiler installed.
+
+If you change `csrc/_hanan.c`, rebuild the binary and commit it with the
+source. You'll need gcc and the Python headers on the machine you build
+on, but not on AWX:
+
+```bash
+python3 scripts/build_ext.py           # stdlib-only build
+python3 scripts/build_ext.py --check   # is the committed binary current?
+```
+
+The build stamps the source's SHA-256 into the binary. The tests fail if
+the committed binary doesn't match the source. At runtime, a stale binary is
+rebuilt if a compiler is available; otherwise it's used with a warning. On a
+platform other than Linux x86_64 (e.g. an ARM EE), run `build_ext.py`
+there once. The pure-Python `astar_route_py` is kept as the readable
+reference, and the tests check the two produce identical routes.
 
 ## Setup
 
 ```bash
 pip install ansible-core      # or use AWX; no other packages or collections
-python3 scripts/build_ext.py  # needs gcc + Python headers
 export NET_USERNAME=admin
 export NET_PASSWORD=secret
 ```
