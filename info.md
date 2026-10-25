@@ -44,7 +44,7 @@ Instead of searching a massive, pixel-by-pixel map (which would be extremely slo
 The collection of scripts works as a modular, data-driven automation pipeline that moves from live network state straight to a fully stylized visual graph.
 
 ```
- [ NAPALM Facts ] ──> ( parser.py ) ──> [ Edge/Node Dicts ]
+ [ Device JSON  ] ──> ( parser.py ) ──> [ Edge/Node Dicts ]
                                               │
  [ template.drawio ] ──> ( main.py ) <────────┘
         │                     │
@@ -55,7 +55,7 @@ The collection of scripts works as a modular, data-driven automation pipeline th
 
 #### 1. Data Ingestion (`parser.py`)
 
-* Reads structured `*.json` configuration and state telemetry dumps captured by Ansible playbooks running NAPALM.
+* Reads structured `*.json` configuration and state telemetry dumps captured by the Ansible playbook (raw show-command output, parsed by `netparse/`).
 * Groups interface IPv4 addresses by their calculated subnets. If exactly two inventory hosts share a subnet, it deduces a point-to-point physical link and notes whether the interfaces are operationally UP or DOWN.
 
 #### 2. Layout & Coordination (`main.py`)
