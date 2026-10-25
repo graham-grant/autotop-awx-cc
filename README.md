@@ -1,227 +1,434 @@
-# Basic Ansible -> drawio topology
+# autotop-awx: network topology diagrams from AWX
 
-Generates a `.drawio` diagram showing how the devices in your Ansible
-inventory connect to each other. Links are derived from directly-connected
-subnets: any two inventory hosts with an interface IP in the same network
-are linked, the same as a directly-connected route would show. Protocol
-overlays (IPsec tunnels so far) are drawn on top, each on its own draw.io
-layer, by self-contained feature plugins.
+This project logs in to the network devices in an Ansible inventory, collects
+their show-command output, and draws a draw.io diagram of how they connect.
+It runs as a single AWX job (or `ansible-playbook` by hand) and needs nothing
+beyond Ansible and a base Python 3.9+ install: no NAPALM, no Ansible
+collections, no PyYAML, nothing to `pip install`, and no compiler.
 
-**No third-party Python packages.** Everything runs on a base Python 3
-install (3.9+): no NAPALM, no PyYAML, nothing to `pip install`, and no
-compiler. The A* router's C extension ships prebuilt (see
-[C extension](#c-extension)).
+The diagram is built in two parts:
 
-The diagram-building side of the project lives in `scripts/`:
+- **The physical diagram.** One node per inventory device, and one link for
+  every subnet two devices share. Links are routed around the nodes so they
+  never overlap, and each end is labelled with its interface, coloured green
+  or red by link status.
+- **Feature layers.** Everything else (IPsec tunnels today; VRFs, VLANs,
+  firewall zones and so on later) is drawn by an independent feature plugin
+  onto its own draw.io layer. Each layer can be shown or hidden in draw.io
+  (**View > Layers**, or Ctrl+Shift+L), so a viewer turns on only what's
+  relevant to them.
 
-- `main.py` — the entry point; run this one (`python3 scripts/main.py`)
-- `config.py` — paths, excluded networks, styling, router tuning, enabled features
-- `netparse/` — parses raw show-command output into the NAPALM-style JSON schema (replaces NAPALM)
-- `parser.py` — reads the JSON facts, derives links from subnets
-- `pathfinder.py` — the Hanan-grid A* router that finds each link's actual path
-- `csrc/_hanan.c` + `_hanan.abi3.so` + `build_ext.py` — the A* search in C, its prebuilt binary, and the stdlib-only build script
-- `renderer.py` — turns routed nodes/links into draw.io XML, with IP/interface labels and status dots
-- `features/` — protocol feature plugins (`ipsec.py`), plus shared overlay geometry (`bundling.py`)
-- `collect.py` / `sshcli.py` — collects a device's show output over one interactive SSH session (system `ssh` + pty)
-- `commands.py` — the show commands to run per platform (core + enabled features)
-- `miniyaml.py` / `inventory.py` — a small YAML reader (replaces PyYAML) and the shared inventory loader
+Contents:
 
-## Layout
+1. [Repository layout](#repository-layout)
+2. [Setup](#setup)
+3. [Data collection, step by step](#data-collection-step-by-step)
+4. [Building the diagram, step by step](#building-the-diagram-step-by-step)
+5. [Rendering features](#rendering-features)
+6. [Configuration reference](#configuration-reference)
+7. [The C extension](#the-c-extension)
+8. [Tests](#tests)
+9. [Limitations and scaling](#limitations-and-scaling)
 
-`group_vars/` lives inside `playbooks/`, not at the project root — Ansible
-only auto-loads `group_vars/`/`host_vars/` from the directory containing
-the playbook file itself (or the inventory file's directory), so it has to
-sit next to `gather_topology.yml` for `net_username`/`net_password` and the
-`network_devices` SSH settings to resolve.
+## Repository layout
 
-## How it works
-
-1. `playbooks/gather_topology.yml` runs `scripts/collect.py` on the
-   controller once per host in the `network_devices` group. It opens one
-   interactive SSH session per device, using the system `ssh` client
-   driven through a pseudo-terminal (`scripts/sshcli.py`, stdlib only), and
-   runs a list of show commands, the way NAPALM did — no NAPALM, no
-   network collections, no `sshpass`. It answers password prompts, in-session
-   `User Name:`/`Password:` logins, pagers and (with `net_enable_password`)
-   `enable`. On a failed login, it prints what the device actually replied.
-   The command list comes from `scripts/commands.py`: the core
-   commands for the host's platform (`show version`, `show interfaces`,
-   `show ip interface` on IOS/IOS-XE) plus whatever each enabled feature
-   needs. The raw output is written, one JSON file per host, to
-   `output/facts/`: `{"inventory_name", "platform", "cli": {command: output}}`.
-2. `scripts/netparse/` parses that output into the same schema NAPALM used
-   to produce (`hostname`, `interfaces`, `interfaces_ip`), so the rest of
-   the pipeline is unchanged. JSON from the older NAPALM-based playbook
-   still loads as-is.
-3. `scripts/parser.py` groups every interface's
-   IPv4 address by network (address + prefix). Any network shared by
-   exactly two inventory hosts becomes a link between them — this is
-   exactly what a directly-connected/local route represents, so no LLDP
-   or CDP needs to be enabled on the devices at all. A network with only
-   one inventory member (e.g. an uplink to a device you don't manage) is
-   skipped, since there's no second endpoint to draw. A network shared by
-   three or more inventory hosts is drawn as a full mesh between them, with
-   a note printed, since that's a shared segment rather than the usual
-   point-to-point /30 or /31 design.
-   Each link shows the IP address of each end's interface next to that end
-   and a small green/red dot indicating whether both ends report the
-   interface as up — a side with no status data is treated as up, since
-   this is a display simplification, not a real health check.
-
-## Link routing
-
-Links are routed by `pathfinder.py`, a true pathfinding engine rather than
-a heuristic: every node edge and port position forms a grid (a Hanan
-grid), and each link is routed across it with A* search, one link at a
-time, "stamping" its path into a shared congestion map so every
-later link can see and avoid the ones already placed. This is what
-actually guarantees two links never run on top of each other, rather than
-just making it unlikely — links only get bent around each other where the
-search genuinely needs to, and stay as straight as the turn penalty allows
-otherwise.
-
-A node whose side doesn't have room for all its ports at a safe minimum
-spacing is grown automatically — by the exact amount needed, not a rough
-estimate — before routing starts. `pathfinder.py` doesn't decide *which*
-side of a node a link uses in the first place, though: that choice is
-still made the way it always was, by a per-node majority vote over that
-node's own links (so a hub with links at slightly different angles ends up
-with all of them on one consistent side), with `scripts/layout.yml` able
-to override it per node:
-
-```yaml
-9500-1: {x: 400, y: 100, side: bottom}
-```
-
-Each link's interface ID (abbreviated, e.g. "GigabitEthernet0/1" ->
-"Gi0/1") is shown rotated next to each end, close to the parent node. The
-IP address label sits a bit further in along the link.
-
-The constants `HANAN_BUFFER` (minimum spacing between lanes),
-`HANAN_TURN_PENALTY` (how strongly the router prefers straight runs over
-extra bends), and `HANAN_MARGIN` (inset from a node's corners when placing
-ports) in `config.py` control routing if the defaults look too tight, too
-bendy, or too loose for a particular topology.
-
-## Keeping node positions stable
-
-For a production network with a fixed set of devices, the automatic
-force-directed layout can place the same nodes differently between runs —
-fine for discovering an unfamiliar topology, but not what you want for a
-diagram people reference repeatedly. `scripts/layout.yml` lets you pin
-specific nodes to fixed coordinates:
-
-```yaml
-core-sw1: {x: 200, y: 150}
-core-sw2: {x: 500, y: 150}
-```
-
-Nodes listed there are placed at those exact coordinates every run; nodes
-not listed fall back to automatic placement (and the script prints a note
-naming them, so newly-added devices are easy to spot and pin once you're
-happy with where they've landed). The diagram itself is still regenerated
-fresh from live data every time — only positions are fixed, not status,
-IPs, or link state.
-
-## Protocol features
-
-Everything drawn on top of the physical diagram is a *feature*: one module
-in `scripts/features/` with three steps:
-
-| step | input | does |
-| --- | --- | --- |
-| `collect(topo)` | host JSON (`topo.cli(host, cmd)`) | parse this feature's facts |
-| `plan(data, topo)` | parsed data + routed physical diagram | work out geometry |
-| `render(plan, layer)` | the plan | add cells to the feature's own draw.io layer |
-
-Features are isolated from each other and from the base diagram, so new
-ones can be added one at a time without disturbing finished work:
-
-- each runs on its own copy of the topology and can't change what others see;
-- its layer is only added if all three steps succeed — a failure is printed
-  and that one feature is left out of the diagram, nothing else changes;
-- cell ids are prefixed with the feature name;
-- each has its own layer (draw.io **Edit > Layers**), so it can be hidden;
-- each declares its own show commands, so the playbook never needs editing;
-- each has its own settings dict, overridable in `config.FEATURE_SETTINGS`.
-
-Turn features on and off (and set layer order) with
-`config.ENABLED_FEATURES`.
-
-### IPsec tunnels (`features/ipsec.py`)
-
-Reads `show crypto session detail` (IOS/IOS-XE), matches each session's
-peer address to the inventory host that owns it, and merges both ends'
-reports into one tunnel (drawn red if either end isn't `UP`). The underlay
-path is the fewest-hops path over the physical links, and the tunnel is
-drawn as a curved, dashed line passing over every router on that path.
-Tunnels terminating on the same router converge onto one side of it and run
-in evenly spaced parallel lanes before reaching it; tunnels sharing a
-physical hop run side by side along it and fan out where their paths split.
-Hovering a tunnel shows its endpoints, addresses, status and path.
-
-A host whose data comes from elsewhere can provide tunnels pre-parsed,
-optionally with an explicit path, under `"ipsec": {"tunnels": [...]}` in its
-JSON (see the module docstring).
-
-### Adding a feature
-
-1. Create `scripts/features/<name>.py` with a `Feature` subclass: set `name`,
-   `label`, `commands = {"ios": ["show ..."]}` and `SETTINGS`, implement
-   `collect` / `plan` / `render`, and end with `FEATURE = MyFeature()`.
-   Overlays that cross routers can reuse `features.bundling.plan_overlays`.
-2. Add its name to `config.ENABLED_FEATURES`.
-3. Add fixture output to `tests/fixtures/facts/` and a `tests/test_<name>.py`.
-
-## C extension
-
-The A* search at the heart of `pathfinder.py` runs in a CPython C extension
-(`scripts/csrc/_hanan.c`), about 80x faster than the equivalent Python on a
-mid-sized topology. It's written against CPython's stable ABI, so one
-compiled file, `scripts/_hanan.abi3.so`, works on every CPython 3.9+ on
-Linux x86_64 (it needs nothing newer than glibc 2.4). That file is
-**prebuilt and committed**, so AWX execution environments need no compiler
-or Python headers. Its build was tested in Rocky Linux 9 with Python 3.9,
-the same base as the stock AWX EE, with no compiler installed.
-
-If you change `csrc/_hanan.c`, rebuild the binary and commit it with the
-source. You'll need gcc and the Python headers on the machine you build
-on, but not on AWX:
-
-```bash
-python3 scripts/build_ext.py           # stdlib-only build
-python3 scripts/build_ext.py --check   # is the committed binary current?
-```
-
-The build stamps the source's SHA-256 into the binary. The tests fail if
-the committed binary doesn't match the source. At runtime, a stale binary is
-rebuilt if a compiler is available; otherwise it's used with a warning. On a
-platform other than Linux x86_64 (e.g. an ARM EE), run `build_ext.py`
-there once. The pure-Python `astar_route_py` is kept as the readable
-reference, and the tests check the two produce identical routes.
+| Path | What it is |
+| --- | --- |
+| `inventory.yml` | The Ansible inventory: devices in `network_devices`, the file server in `artifact_server` |
+| `playbooks/gather_topology.yml` | The whole pipeline: collect, build, publish |
+| `playbooks/group_vars/` | Credential lookups (`all.yml`) and SSH options (`network_devices.yml`) |
+| `docs/Prod_Library.xml` | draw.io shape library holding the device icons |
+| `scripts/collect.py` | Logs in to one device and saves its show-command output as JSON |
+| `scripts/sshcli.py` | Interactive SSH session driver (system `ssh` client + a pseudo-terminal) |
+| `scripts/commands.py` | Works out which show commands to run on a device |
+| `scripts/netparse/` | Parses raw show output into structured interface data, one module per platform |
+| `scripts/main.py` | Entry point for building the diagram |
+| `scripts/parser.py` | Loads the JSON files and derives links from shared subnets |
+| `scripts/drawio_position_loader.py` | Reads and writes node positions in `template.drawio` |
+| `scripts/pathfinder.py` | The link router (Hanan grid + A* search) |
+| `scripts/csrc/_hanan.c`, `scripts/_hanan.abi3.so`, `scripts/build_ext.py` | The A* search in C, its prebuilt binary, and its build script |
+| `scripts/renderer.py` | Writes nodes, links and interface labels as draw.io XML |
+| `scripts/icon_library.py` | Reads the icon library so nodes can show device pictures |
+| `scripts/features/` | Feature plugins (`ipsec.py`) and their shared helpers |
+| `scripts/inventory.py`, `scripts/miniyaml.py` | Inventory reader and the small YAML parser it uses |
+| `scripts/config.py` | All tunable settings |
+| `tests/` | Unit and end-to-end tests with fixture device output |
 
 ## Setup
 
-```bash
-pip install ansible-core      # or use AWX; no other packages or collections
-export NET_USERNAME=admin
-export NET_PASSWORD=secret
+### Inventory
+
+Each device goes under `network_devices` with its address and platform:
+
+```yaml
+all:
+  children:
+    network_devices:
+      hosts:
+        core-rtr1:
+          ansible_host: 10.0.0.1
+          ansible_network_os: ios     # ios / iosxe today
+          icon: "ASR1004 Front"       # optional: a title from docs/Prod_Library.xml
+          w: 230                      # optional node size
+          h: 42
+    artifact_server:
+      hosts:
+        diagram-host:
+          ansible_host: 192.168.10.175
 ```
 
-Edit `inventory.yml` with your actual devices — each host needs
-`ansible_host` and `ansible_network_os` (`ios` / `iosxe` are supported by
-`netparse` today).
+`icon`, `w` and `h` can also be set once for a whole group under `vars:`.
+A host-level value wins over a group value.
 
-Credentials come from the job's environment. **In AWX, attach a credential
-of the built-in "Network" type to the job template.** It injects
-`ANSIBLE_NET_USERNAME` / `ANSIBLE_NET_PASSWORD`, plus `ANSIBLE_NET_AUTH_PASS`
-if you fill in the "Authorize password" field, which is used as the enable
-secret. No custom credential type is needed. When running by hand, export
-`NET_USERNAME` / `NET_PASSWORD`. The old `NAPALM_*` names are still
-accepted. The playbook stops before contacting any device if no credentials
-are found. Extra `ssh` options (e.g. legacy key exchange) go in
-`playbooks/group_vars/network_devices.yml`. The controller needs
-the OpenSSH client, which every AWX execution environment includes.
+### Credentials
+
+Credentials are read from the job's environment and are never stored in the
+repository or passed on a command line.
+
+- **In AWX**, attach a credential of the built-in **Network** type to the job
+  template. It sets `ANSIBLE_NET_USERNAME` and `ANSIBLE_NET_PASSWORD`. If the
+  devices need an enable secret, fill in "Authorize password", which sets
+  `ANSIBLE_NET_AUTH_PASS`. No custom credential type is needed.
+- **By hand**, export `NET_USERNAME` and `NET_PASSWORD` (and optionally
+  `NET_ENABLE_PASSWORD`).
+
+The older `NAPALM_USERNAME` / `NAPALM_PASSWORD` names are still accepted.
+
+### SSH options
+
+Devices that only offer old key-exchange or host-key algorithms need extra
+`ssh` options. Set them in `playbooks/group_vars/network_devices.yml`:
+
+```yaml
+net_ssh_args: "-o KexAlgorithms=+diffie-hellman-group14-sha1 -o HostKeyAlgorithms=+ssh-rsa"
+```
+
+`group_vars/` has to sit next to the playbook, because that's one of the
+places Ansible looks for it.
+
+## Data collection, step by step
+
+`playbooks/gather_topology.yml` runs five plays in order.
+
+**Play 1: prepare (localhost).**
+It creates `output/facts/`, then imports `pathfinder.py` to confirm the
+prebuilt C extension loads. If it can't, the job stops here, before any
+device is contacted.
+
+**Play 2: collect (every host in `network_devices`).**
+Ansible doesn't connect to the devices itself (`connection: local`). For each
+device, Ansible's normal forks run `scripts/collect.py` on the controller,
+which does the following:
+
+1. It checks that a username and password were found. If not, the play fails
+   with a message telling you to attach the Network credential.
+2. It asks `commands.py` which commands to run. That list is the core
+   commands for the device's platform plus every command an enabled feature
+   declares. On IOS / IOS-XE that's currently `show version`,
+   `show interfaces`, `show ip interface` and `show crypto session detail`.
+3. It opens one interactive SSH session to the device with `sshcli.py`. This
+   runs the system `ssh` client through a pseudo-terminal and replies to
+   prompts the way a person would: the SSH password prompt, a second
+   `User Name:` / `Password:` login inside the session, `--More--` pagers,
+   and `enable` if the device lands at a `>` prompt and an enable secret was
+   given. If the login is refused, the error shows what the device actually
+   replied, with passwords masked.
+4. It turns off paging (`terminal length 0`), then runs each command. A
+   command the device rejects is skipped and the rest still run.
+5. It writes the raw output to `output/facts/<inventory name>.json`:
+
+   ```json
+   {"inventory_name": "core-rtr1", "platform": "ios",
+    "cli": {"show version": "...", "show interfaces": "...", "...": "..."}}
+   ```
+
+Collection is the only step that talks to the devices. Everything after it,
+features included, works from these JSON files.
+
+**Play 3: copy the facts (`artifact_server`).**
+It copies `output/facts/` to the artifact server, so the raw data outlives
+the AWX job container.
+
+**Play 4: build (localhost).**
+It runs `scripts/main.py output/facts output` and prints its output in the
+job log. The next section covers what it does.
+
+**Play 5: publish (`artifact_server`).**
+It copies `output/topology.drawio` to the artifact server.
+
+## Building the diagram, step by step
+
+`scripts/main.py` turns the JSON files into `topology.drawio`:
+
+1. **Parse.** `parser.py` loads every JSON file, and `netparse/` turns each
+   device's raw output into structured data: hostname, interfaces (up/down,
+   enabled, speed, MTU, MAC) and interface IPv4 addresses. Files in the older
+   NAPALM-based format are still read as they are.
+2. **Derive links.** Every interface address is grouped by subnet. A subnet
+   shared by exactly two devices becomes a link between them. That's what a
+   directly connected route means, so CDP and LLDP aren't needed. A subnet
+   only one device has (an uplink to something not in the inventory) is
+   skipped. A subnet three or more devices share is drawn as a full mesh,
+   with a note in the log. Subnets in `config.EXCLUDED_NETWORKS` (such as a
+   management network) are ignored. A link is up unless either end reports
+   its interface as down.
+3. **Place nodes.** Positions come from `template.drawio` at the project
+   root (see [Node positions](#node-positions)). Devices that aren't in it
+   yet are put in a staging grid below the rest.
+4. **Route links.** `pathfinder.py` picks which side of each node every link
+   leaves from and routes each link around the nodes so no two links overlap
+   (see [Link routing](#link-routing)).
+5. **Render the physical diagram.** `renderer.py` writes the nodes (with
+   icons where set), the routed links and the interface labels.
+6. **Run features.** Each enabled feature draws onto its own layer (see
+   [Feature layers](#feature-layers)). The log reports `ok` or the error for
+   each one.
+7. **Write files.** It writes `output/topology.drawio`, then rewrites
+   `template.drawio` with every node's final position.
+
+## Rendering features
+
+### Physical diagram (base layer)
+
+The base layer is always drawn. Everything in it comes from the core show
+commands.
+
+#### Nodes and icons
+
+Each device is a node labelled with its inventory name. If the host has an
+`icon` in the inventory, the node shows that picture from
+`docs/Prod_Library.xml`. The value must match an entry's title in the
+library exactly, such as `"C9200-24P Front"`. A host with no icon is drawn
+as a plain rounded rectangle. If an icon name isn't found, the log says so
+and the rectangle is used.
+
+#### Node positions
+
+Node positions are kept in `template.drawio` at the project root, a
+stripped-down diagram with one rectangle per device and nothing else.
+To move nodes, open that file in draw.io, drag them, and save. The next run
+uses the new positions. Each run rewrites the file to match the inventory:
+existing nodes keep their positions, and new devices appear in the staging
+grid, ready to be dragged into place. Every node label in it must match an
+inventory host, so a typo stops the run instead of silently dropping a node.
+
+To force the side of a node that its links attach to, add a custom property
+named `side` with the value `top`, `bottom`, `left` or `right` to that node in
+`template.drawio` (right-click > **Edit Data**). Without one, each node uses
+whichever side most of its links point towards.
+
+#### Links and interface labels
+
+Each link is drawn as an orthogonal line between the two devices. At each
+end, a label shows the abbreviated interface name (`GigabitEthernet0/1`
+becomes `Gi0/1`), placed against the node. The label background is green if
+the link is up and red if either end reports it down. A device that reports
+no status for an interface counts as up, so this is a display aid, not a
+health check.
+
+#### Link routing
+
+`pathfinder.py` routes links on a Hanan grid: a sparse grid built from every
+node edge, node centre and port position. It routes one link at a time with
+A* search, and each placed link is marked on a shared congestion map, so
+later links route around it. This guarantees that no two links run on top of
+each other. Links bend only where they have to, and links heading the same
+way tend to run together in parallel lanes. If a node side doesn't have room
+for all its ports, the node is widened by exactly the amount needed.
+
+These settings in `config.py` tune the routing:
+
+| Setting | Effect |
+| --- | --- |
+| `HANAN_BUFFER` | Minimum gap between parallel links |
+| `HANAN_TURN_PENALTY` | How strongly straight runs are preferred over extra bends |
+| `HANAN_MARGIN` | How far ports are kept from a node's corners |
+| `HANAN_AFFINITY_PENALTY` | How strongly links are pulled into running alongside each other |
+
+`info.md` explains the routing algorithm in more depth.
+
+### Feature layers
+
+Everything drawn on top of the physical diagram comes from a feature: one
+module in `scripts/features/`. Features are built to be added one at a time
+without disturbing each other or the base diagram:
+
+- **Own layer.** Each feature draws onto its own named draw.io layer, which
+  viewers can show, hide or lock.
+- **Own data.** Each feature declares the show commands it needs per
+  platform. Collection picks them up automatically, so adding a feature never
+  means editing the playbook.
+- **Own copy of the topology.** Each feature gets a private copy of the
+  devices, links and routed geometry, so it can't change what another
+  feature sees.
+- **All or nothing.** A feature's layer is added only if it finishes without
+  an error. If it fails, the error is logged and that one layer is left out.
+  The rest of the diagram is unaffected.
+- **No id clashes.** Every cell a feature draws has an id prefixed with the
+  feature name.
+- **Own settings.** Each feature has a `SETTINGS` dictionary of defaults
+  (colours, spacing), which can be overridden per feature in
+  `config.FEATURE_SETTINGS`.
+
+`config.ENABLED_FEATURES` lists the features to run. Its order is also the
+layer stacking order.
+
+A feature runs in three steps:
+
+| Step | Input | Output |
+| --- | --- | --- |
+| `collect(topo)` | Each device's JSON, through `topo.cli(host, command)` | The feature's parsed data |
+| `plan(data, topo)` | Parsed data plus the routed physical diagram | Geometry: what to draw and where |
+| `render(plan, layer)` | The plan | Cells on the feature's layer |
+
+`topo` gives each step the devices, links and node geometry, plus helpers
+that most features need: which device owns an IP address, and the
+fewest-hops path between two devices.
+
+#### IPsec tunnels (`features/ipsec.py`)
+
+**Layer:** "IPsec tunnels". **Command:** `show crypto session detail`
+(IOS / IOS-XE).
+
+What it shows: every IPsec tunnel between two inventory devices, drawn as a
+curved, dashed line that passes over every router the tunnel crosses.
+Tunnels are purple when up and red when either end reports them down.
+Hovering a tunnel shows its endpoints, addresses, interfaces, status and
+path.
+
+How it works:
+
+1. **Find the sessions.** Each device's `show crypto session detail` output
+   is parsed into sessions: tunnel interface, local address, peer address
+   and status. The local address comes from the IKE SA line, or from the
+   IPsec flow if IKE is down.
+2. **Find both ends.** Each peer address is looked up among every interface
+   address on every device, loopbacks included. The device that owns it is
+   the far end. A peer that isn't in the inventory is skipped.
+3. **Merge.** Both ends usually report the same tunnel, so the two reports
+   are merged into one tunnel. It's drawn as down if either end doesn't
+   report it as up.
+4. **Find the path.** The routers in between are found with a fewest-hops
+   search over the physical links, preferring links that are up. This is the
+   likely underlay path, not necessarily the one the routing table uses.
+5. **Lay out the lines** (`features/bundling.py`):
+   - Tunnels that end on the same device all approach it from the same side
+     and run in evenly spaced parallel lanes for the last stretch.
+   - Tunnels that share a physical hop run side by side along it, ordered so
+     they don't cross, and fan out where their paths split.
+   - Over a transit router, each tunnel keeps its lane, so they pass over in
+     parallel.
+
+Settings (`config.FEATURE_SETTINGS["ipsec"]`): `up_color`, `down_color`,
+`style`, `lane_spacing`, `converge_near`, `converge_far`, `transit_spacing`.
+
+If a device's tunnel data comes from somewhere other than this collector,
+its JSON can carry the tunnels already parsed, each with an optional explicit
+`path`, which then replaces the fewest-hops guess:
+
+```json
+"ipsec": {"tunnels": [{"interface": "Tunnel10", "local_address": "203.0.113.1",
+                       "peer_address": "198.51.100.7", "status": "UP-ACTIVE",
+                       "path": ["branch1", "isp-rtr", "hq"]}]}
+```
+
+#### Adding a feature
+
+1. Create `scripts/features/<name>.py` with a subclass of `Feature`. Set
+   `name`, `label` (the layer name), `commands` (for example
+   `{"ios": ["show vrf detail"]}`) and `SETTINGS`. Implement `collect`, `plan`
+   and `render`, and end the module with `FEATURE = MyFeature()`. Overlays
+   that cross routers can reuse `features.bundling.plan_overlays`.
+2. Add the name to `config.ENABLED_FEATURES`.
+3. Add sample device output under `tests/fixtures/` and a
+   `tests/test_<name>.py`.
+
+### Adding a device platform
+
+Device platforms are separate from features. A platform tells collection
+what to run and tells `netparse` how to read the core output. To add one
+(NX-OS, EOS, PAN-OS and so on):
+
+1. Write `scripts/netparse/<platform>.py` with `CORE_COMMANDS`, optionally
+   `PAGING_COMMANDS`, and `parse(cli)`, which returns `hostname`,
+   `interfaces` and `interfaces_ip` in the same shape as `ios.py`.
+2. Register it in `_DRIVERS` and `_ALIASES` in `scripts/netparse/__init__.py`.
+3. For each feature that should work on the new platform, add its commands
+   and a parser to that feature.
+
+## Configuration reference
+
+All settings live in `scripts/config.py`:
+
+| Setting | Purpose |
+| --- | --- |
+| `DEFAULT_FACTS_DIR`, `DEFAULT_OUTPUT_DIR` | Where JSON is read from and the diagram is written to |
+| `DEFAULT_INVENTORY_PATH`, `DEFAULT_TEMPLATE_PATH`, `DEFAULT_ICON_LIBRARY_PATH` | Inventory, position template and icon library |
+| `EXCLUDED_NETWORKS` | Subnets never drawn as links, including any smaller subnet inside them |
+| `NEW_NODE_GRID_*` | Layout of the staging grid for new devices |
+| `DEFAULT_NODE_W`, `DEFAULT_NODE_H` | Node size when the inventory doesn't set `w` / `h` |
+| `HANAN_*` | Link routing, see [Link routing](#link-routing) |
+| `STATUS_UP_COLOR`, `STATUS_DOWN_COLOR` | Interface label colours |
+| `INTF_LABEL_STYLE`, `INTF_ABBREVIATIONS` | Interface label style and name abbreviations |
+| `ENABLED_FEATURES` | Features to run, in layer order |
+| `FEATURE_SETTINGS` | Per-feature overrides, such as `{"ipsec": {"up_color": "#0050EF"}}` |
+
+`main.py` also takes these on the command line:
+
+```bash
+python3 scripts/main.py [facts_dir] [output_dir] [--inventory=PATH] [--template=PATH] [--icon-library=PATH]
+```
+
+## Running it
+
+**In AWX:** create a job template for `playbooks/gather_topology.yml` with
+the project's `inventory.yml` as its inventory, and attach a Network
+credential. When the job finishes, the diagram is at the path on the
+artifact server that the last play copies it to, and the raw JSON is
+alongside it under `output/facts/`. The stock AWX execution environment is
+enough, since everything the job needs is standard Python and the OpenSSH
+client.
+
+**By hand:**
+
+```bash
+export NET_USERNAME=admin NET_PASSWORD=secret
+ansible-playbook -i inventory.yml playbooks/gather_topology.yml
+```
+
+To rebuild the diagram from JSON that's already been collected, without
+contacting any device:
+
+```bash
+python3 scripts/main.py output/facts output
+```
+
+Open `output/topology.drawio` in draw.io (desktop, web, or the VS Code
+extension).
+
+## The C extension
+
+The A* search in `pathfinder.py` runs in a CPython C extension,
+`scripts/csrc/_hanan.c`, about 80 times faster than the same code in Python.
+It's built against CPython's stable ABI, so one compiled file,
+`scripts/_hanan.abi3.so`, loads on every CPython 3.9 or later on Linux
+x86_64, and needs nothing newer than glibc 2.4. That file is prebuilt and
+committed, so AWX needs no compiler or Python headers.
+
+If you change `_hanan.c`, rebuild the binary on a machine with gcc and the
+Python headers, and commit it with the source:
+
+```bash
+python3 scripts/build_ext.py           # build
+python3 scripts/build_ext.py --check   # does the committed binary match the source?
+```
+
+The build stamps the source's SHA-256 into the binary, and the tests fail if
+the committed binary doesn't match the source. At runtime, a stale binary is
+rebuilt if a compiler is available, and otherwise used with a warning. On a
+platform other than Linux x86_64 (an ARM execution environment, say), run
+`build_ext.py` there once. The pure-Python `astar_route_py` is kept as the
+readable reference, and the tests check that both produce identical routes.
 
 ## Tests
 
@@ -229,60 +436,60 @@ the OpenSSH client, which every AWX execution environment includes.
 python3 -m unittest discover -s tests
 ```
 
-Fixture show-command output for a six-router topology with three IPsec
-tunnels is in `tests/fixtures/`.
+The fixtures in `tests/fixtures/` describe a six-router topology with three
+IPsec tunnels. The tests cover the YAML parser, the IOS parsers, the SSH
+session driver (against a fake `ssh`), the feature framework, the IPsec
+feature, the C extension against the Python reference, and a full run of
+`main.py`.
 
-## Running this in AWX
+## Limitations and scaling
 
-Since AWX job containers are ephemeral, don't try to manually copy
-`output/facts/*.json` off the execution environment between runs — the
-playbook now does the whole pipeline (gather → build → publish) in a single
-job. After the gather play writes each host's JSON, a third play runs
-`scripts/main.py` and publishes the resulting `topology.drawio` file,
-base64-encoded, as an AWX job artifact via `set_stats`.
+### Current limitations
 
-To get the file after a successful run:
-1. Open the completed job in AWX and go to its **Details** tab (or fetch
-   `/api/v2/jobs/<id>/` from the API) — look for the `artifacts` field,
-   which will contain a key `topology_drawio_b64`.
-2. Copy that base64 string, then decode it locally:
-   ```bash
-   echo "<paste the base64 string>" | base64 -d > topology.drawio
-   ```
-   or in Python:
-   ```python
-   import base64
-   open("topology.drawio", "wb").write(base64.b64decode("<paste>"))
-   ```
-3. Open `topology.drawio` in draw.io.
+- Only Cisco IOS / IOS-XE is supported today. On any other platform the
+  collector logs in but has no commands to run, so the device appears as a
+  node with no links until a `netparse` module exists for it.
+- Links come from IPv4 subnets. A device with only unnumbered or IPv6
+  interfaces, or a pure layer-2 switch with no routed interfaces, won't
+  connect to anything.
+- The design assumes point-to-point subnets (a /30 or /31 per link). Shared
+  segments are drawn as a full mesh.
+- The IPsec path is the fewest-hops guess unless an explicit path is given.
+- Collection uses SSH and a CLI. Windows servers will need a different
+  collector (WinRM, for example) that writes the same JSON format.
 
-## Running this locally (without AWX)
+### Scaling to hundreds of devices
 
-```bash
-ansible-playbook -i inventory.yml playbooks/gather_topology.yml
-python3 scripts/main.py
-```
+draw.io itself copes with diagrams this size. Cell counts in the low
+thousands open and pan normally, and layers keep feature data out of the
+way until it's wanted. Two parts of this project need work before a
+production run of hundreds of devices:
 
-Open `output/topology.drawio` in draw.io (desktop app, web app, or the VS
-Code extension).
+- **Icon size.** Each icon in `docs/Prod_Library.xml` is 90 to 350 KB, and
+  every node that uses one carries its own copy. Without icons, the diagram
+  is about 2 KB per device, so 400 devices make an 0.8 MB file. With icons
+  on all 400, the same diagram would be 60 to 140 MB, which draw.io handles
+  badly. The fix is smaller icons (simplified SVGs of a few KB each) or
+  referencing each image once instead of embedding it per node.
+- **Routing time.** Routing time grows with the square of the number of
+  links. Measured on synthetic grid topologies:
 
-## Notes
+  | Devices | Links | Build time |
+  | --- | --- | --- |
+  | 50 | 85 | 1 s |
+  | 100 | 179 | 3.5 s |
+  | 200 | 371 | 13 s |
+  | 400 | 759 | 52 s |
 
-- Each host needs at least one interface IP for any link to be drawn at
-  all — a device with no `interfaces_ip` data (e.g. only unnumbered
-  interfaces, or no `netparse` support for its platform) won't connect to anything in the
-  diagram even if it's physically cabled to other inventory hosts.
-- `EXCLUDED_NETWORKS` in `config.py` lets you ignore specific subnets
-  entirely — e.g. end-host/access VLANs that happen to be configured on a
-  router/switch interface but shouldn't be drawn as an inter-device link.
-  A more specific subnet within an excluded one (e.g. a /30 carved out of
-  an excluded /24) is excluded too.
-- This assumes a fairly clean point-to-point addressing scheme (a distinct
-  /30 or /31 per link, which is what the directly-connected-route approach
-  is built around). A shared multi-access subnet with three or more
-  inventory hosts on it still gets drawn (as a full mesh, with a note
-  printed), but that's a different physical topology shape than a true
-  shared-segment diagram would normally use.
-- Platforms other than IOS/IOS-XE (NX-OS, EOS, Junos, PAN-OS, ...) need a
-  parser module in `scripts/netparse/` (see its docstring) and, per
-  feature, an entry in that feature's `commands`/parsers.
+  That's fine for a scheduled AWX job, but 1,000 or more devices on one page
+  would take several minutes.
+
+The planned way to scale is to split the network across draw.io pages (the
+tabs along the bottom), one per site or region, plus an overview page with
+one node per site. Each page is routed separately, which keeps routing fast
+and each page readable. Layers then hold the detail within a page: VLANs,
+VRFs, tunnels, firewall zones.
+
+If even that outgrows draw.io, the collected JSON doesn't depend on it.
+Another renderer, such as an interactive web view with search and
+filtering, could be added alongside draw.io and read the same files.

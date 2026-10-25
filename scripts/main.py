@@ -15,7 +15,7 @@ miniyaml.py, and the A* router's search runs in a C extension that ships
 prebuilt (_hanan.abi3.so, CPython 3.9+ stable ABI) - no compiler needed.
 
 Links are derived from directly-connected subnets: every interface IP
-NAPALM reports is grouped by network, and any subnet shared by exactly two
+the device reports is grouped by network, and any subnet shared by exactly two
 inventory hosts becomes a link between them. A subnet shared by three or
 more hosts is drawn as a full mesh, with a note printed.
 
@@ -42,7 +42,7 @@ Usage:
 
 Defaults: facts_dir=output/facts, output_dir=output,
 inventory=<project root>/inventory.yml, template=<project root>/template.drawio,
-icon-library=<project root>/Prod_Library.xml
+icon-library=<project root>/docs/Prod_Library.xml
 
 Each host can get a preferred icon by adding an `icon:` key to its entry
 in inventory.yml (or a `vars: {icon: ...}` block on a group, inherited by
