@@ -17,8 +17,10 @@ Records that already carry "interfaces"/"interfaces_ip" (e.g. JSON from
 the older NAPALM-based playbook) are passed through unchanged.
 
 Adding a platform: write a module with CORE_COMMANDS and a
-parse(cli) -> {hostname, interfaces, interfaces_ip} function, and add it to
-_DRIVERS / _ALIASES below.
+parse(cli) -> {hostname, interfaces, interfaces_ip} function (optionally
+PAGING_COMMANDS and CONFIG_CHECK_COMMAND), add it to _DRIVERS / _ALIASES
+below, and give it a read-only policy in scripts/readonly.py - without one
+the collector refuses to contact it.
 """
 from __future__ import annotations
 
@@ -44,6 +46,13 @@ _DEFAULT_PAGING = ["terminal length 0", "terminal datadump"]
 def paging_commands(network_os: str) -> list[str]:
     driver = _DRIVERS.get(platform_key(network_os))
     return list(getattr(driver, "PAGING_COMMANDS", _DEFAULT_PAGING))
+
+
+def config_check_command(network_os: str) -> str | None:
+    """A read-only command whose output changes whenever the device's
+    configuration does, or None if the platform has none."""
+    driver = _DRIVERS.get(platform_key(network_os))
+    return getattr(driver, "CONFIG_CHECK_COMMAND", None)
 
 
 def core_commands(network_os: str) -> list[str]:

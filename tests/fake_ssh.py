@@ -3,7 +3,12 @@
 asks for the SSH password, then logs in again in-band ("User Name:" /
 "Password:"), pages output with an AT-8000S style pager, and knows
 "terminal datadump". FAKE_SSH_MODE=wrongpass rejects the in-band login;
-FAKE_SSH_MODE=plain skips the in-band login (IOS-like)."""
+FAKE_SSH_MODE=plain skips the in-band login (IOS-like);
+FAKE_SSH_MODE=configchange makes the config-change marker move between
+reads. Every line received after login is appended to $FAKE_SSH_LOG (if
+set), so tests can compare what the device got with collect's audit.
+"show confirm-test" asks for "[confirm]"; "show hang" never finishes until
+Ctrl-C."""
 import os
 import sys
 import termios
@@ -11,6 +16,13 @@ import tty
 
 MODE = os.environ.get("FAKE_SSH_MODE", "inband")
 PAGER = "More: <space>,  Quit: q or CTRL+Z, One line: <return> "
+LOG = os.environ.get("FAKE_SSH_LOG")
+
+
+def log(entry):
+    if LOG:
+        with open(LOG, "a") as f:
+            f.write(entry + "\n")
 
 
 def out(s):
@@ -25,6 +37,9 @@ def line(echo=True):
         if c in ("\r", "\n", ""):
             out("\r\n")
             return buf
+        if c == "\x03":
+            out("^C\r\n")
+            return c
         if echo:
             out(c)
         buf += c
@@ -45,9 +60,13 @@ if MODE != "plain":
         line()
         sys.exit(1)
 paging = True
+config_reads = 0
 while True:
     out("AT-8K-1# ")
     cmd = line()
+    log("ctrl-c" if cmd == "\x03" else cmd)
+    if cmd == "\x03":
+        continue
     if cmd == "terminal datadump":
         paging = False
     elif cmd == "show interfaces status":
@@ -57,6 +76,19 @@ while True:
                 out(PAGER)
                 sys.stdin.read(1)
                 out("\r" + " " * len(PAGER) + "\r")
+    elif cmd == "show running-config | include configuration change":
+        config_reads += 1
+        minute = 10 + (config_reads if MODE == "configchange" else 0)
+        out(f"! Last configuration change at 09:{minute}:00 UTC Mon Oct 26 2026 by admin\r\n")
+    elif cmd == "show confirm-test":
+        out("Proceed with reload? [confirm]")
+        log("CONFIRMED" if sys.stdin.read(1) != "\x03" else "ctrl-c")
+        out("^C\r\n")
+    elif cmd == "show hang":
+        while sys.stdin.read(1) != "\x03":
+            pass
+        log("ctrl-c")
+        out("^C\r\n")
     elif cmd == "show version":
         out("SW version    3.0.0.44\r\n")
     elif cmd in ("exit", "logout"):

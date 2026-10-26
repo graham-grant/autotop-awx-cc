@@ -6,6 +6,11 @@ It runs as a single AWX job (or `ansible-playbook` by hand) and needs nothing
 beyond Ansible and a base Python 3.9+ install: no NAPALM, no Ansible
 collections, no PyYAML, nothing to `pip install`, and no compiler.
 
+Collection is strictly read-only. Every command sent to a device is checked
+against a per-platform allowlist before it is sent, recorded, and verified
+again after the run, and a configuration change during collection fails the
+job. See [Read-only collection](#read-only-collection).
+
 The diagram is built in two parts:
 
 - **The physical diagram.** One node per inventory device, and one link for
@@ -23,24 +28,30 @@ Contents:
 1. [Repository layout](#repository-layout)
 2. [Setup](#setup)
 3. [Data collection, step by step](#data-collection-step-by-step)
-4. [Building the diagram, step by step](#building-the-diagram-step-by-step)
-5. [Rendering features](#rendering-features)
-6. [Configuration reference](#configuration-reference)
-7. [The C extension](#the-c-extension)
-8. [Tests](#tests)
-9. [Limitations and scaling](#limitations-and-scaling)
+4. [Read-only collection](#read-only-collection)
+5. [Building the diagram, step by step](#building-the-diagram-step-by-step)
+6. [Rendering features](#rendering-features)
+7. [Configuration reference](#configuration-reference)
+8. [The C extension](#the-c-extension)
+9. [Tests](#tests)
+10. [Limitations and scaling](#limitations-and-scaling)
+11. [Design history](#design-history)
 
 ## Repository layout
 
 | Path | What it is |
 | --- | --- |
 | `inventory.yml` | The Ansible inventory: devices in `network_devices`, the file server in `artifact_server` |
-| `playbooks/gather_topology.yml` | The whole pipeline: collect, build, publish |
+| `playbooks/gather_topology.yml` | The whole pipeline: collect, build, publish, audit |
 | `playbooks/group_vars/` | Credential lookups (`all.yml`) and SSH options (`network_devices.yml`) |
 | `docs/Prod_Library.xml` | draw.io shape library holding the device icons |
+| `docs/design-archive/` | Design documents, one dated folder per revision |
+| `CLAUDE.md` | Standing rules for anyone (or any assistant) changing the code |
 | `scripts/collect.py` | Logs in to one device and saves its show-command output as JSON |
 | `scripts/sshcli.py` | Interactive SSH session driver (system `ssh` client + a pseudo-terminal) |
 | `scripts/commands.py` | Works out which show commands to run on a device |
+| `scripts/readonly.py` | The read-only command policy every command must pass before it is sent |
+| `scripts/audit.py` | Re-checks the commands recorded for every device after collection |
 | `scripts/netparse/` | Parses raw show output into structured interface data, one module per platform |
 | `scripts/main.py` | Entry point for building the diagram |
 | `scripts/parser.py` | Loads the JSON files and derives links from shared subnets |
@@ -108,12 +119,15 @@ places Ansible looks for it.
 
 ## Data collection, step by step
 
-`playbooks/gather_topology.yml` runs five plays in order.
+`playbooks/gather_topology.yml` runs six plays in order.
 
 **Play 1: prepare (localhost).**
 It creates `output/facts/`, then imports `pathfinder.py` to confirm the
-prebuilt C extension loads. If it can't, the job stops here, before any
-device is contacted.
+prebuilt C extension loads. It then prints the read-only command plan for
+each platform in the inventory (`collect.py --plan`): every command that
+will be sent, each checked against the read-only policy. If the C extension
+can't load, a platform has no read-only policy, or a planned command would
+be refused, the job stops here, before any device is contacted.
 
 **Play 2: collect (every host in `network_devices`).**
 Ansible doesn't connect to the devices itself (`connection: local`). For each
@@ -133,14 +147,28 @@ which does the following:
    and `enable` if the device lands at a `>` prompt and an enable secret was
    given. If the login is refused, the error shows what the device actually
    replied, with passwords masked.
-4. It turns off paging (`terminal length 0`), then runs each command. A
-   command the device rejects is skipped and the rest still run.
-5. It writes the raw output to `output/facts/<inventory name>.json`:
+4. It turns off paging (`terminal length 0`) and reads the configuration
+   change marker (`show running-config | include configuration change`).
+   Then it runs each command. A command the device rejects is skipped and
+   the rest still run. Finally it reads the marker again.
+5. Every line it sends is checked against the read-only policy first and
+   printed in the job log as it is sent.
+6. It writes the raw output to `output/facts/<inventory name>.json`, with a
+   record of every line sent and the result of the configuration check:
 
    ```json
    {"inventory_name": "core-rtr1", "platform": "ios",
-    "cli": {"show version": "...", "show interfaces": "...", "...": "..."}}
+    "cli": {"show version": "...", "show interfaces": "...", "...": "..."},
+    "audit": {"policy": "ios",
+              "commands": [{"time": "2026-10-26T01:00:03+00:00", "command": "show version",
+                            "kind": "collect", "status": "ok"}, "..."],
+              "config_check": {"status": "unchanged", "command": "...",
+                               "before": "! Last configuration change at ...",
+                               "after": "! Last configuration change at ..."}}}
    ```
+
+   If the marker changed, the file is still written, and the host fails with
+   exit code 3 and a `CONFIGURATION CHANGED DURING COLLECTION` message.
 
 Collection is the only step that talks to the devices. Everything after it,
 features included, works from these JSON files.
@@ -155,6 +183,49 @@ job log. The next section covers what it does.
 
 **Play 5: publish (`artifact_server`).**
 It copies `output/topology.drawio` to the artifact server.
+
+**Play 6: audit (localhost).**
+It runs `scripts/audit.py output/facts`, which re-checks every recorded
+command in every facts file against the read-only policy, independently of
+the check made when it was sent, and prints one line per device. The job
+fails if any command was out of policy, refused or cancelled, if a
+configuration changed, or if a facts file has no audit record. It runs last,
+so the diagram is still published.
+
+## Read-only collection
+
+Collection must never change a device's configuration. Every command it
+sends is only for gathering information, and that is enforced in code, not
+left to the command lists. The full design is in
+[docs/design-archive/2026-10-26/read-only-collection-safeguards.md](docs/design-archive/2026-10-26/read-only-collection-safeguards.md).
+
+| Safeguard | Where | What it does |
+| --- | --- | --- |
+| Allowlist per platform | `scripts/readonly.py` | On IOS, only `show ...` with display filters after a pipe (`include`, `exclude`, `begin`, `section`, `count`), plus `terminal length 0`, `terminal width N` and `terminal datadump`, which affect only the current session. `show ... \| redirect`, `tee` and `append` are refused, because they write files. |
+| Denylist of state-changing verbs | `scripts/readonly.py` | A command starting with, or abbreviating, a verb such as `configure`, `write`, `copy`, `reload`, `delete`, `erase`, `clear`, `debug`, `set`, `commit`, `request` or a PowerShell `Set-`/`New-`/`Remove-` verb is refused, even if an allowlist entry were wrong. |
+| Character check | `scripts/readonly.py` | Newlines, control characters, tabs and `?` are refused, so nothing can smuggle a second command onto the line. |
+| Fail closed | `scripts/readonly.py`, `collect.py` | A platform without a policy is never contacted. |
+| Enforced at the lowest layer | `scripts/sshcli.py` | `CliSession.run()` refuses to send anything the policy doesn't allow, and a session with no policy sends nothing. The only other input ever typed is the login answers, `enable` and `exit`. |
+| Confirmations are never answered | `scripts/sshcli.py` | If a device asks `[confirm]`, `[yes/no]`, `(y/n)` or `...]?`, the session sends Ctrl-C, stops using the session and fails the host. A command that times out is also cancelled with Ctrl-C before anything else is sent. |
+| Plan before connecting | `collect.py --plan`, play 1 | Prints every command per platform and stops the job if any would be refused. |
+| Audit trail | `sshcli.py`, `collect.py` | Every line sent is printed in the job log and stored with a timestamp and outcome in the facts file. |
+| Configuration-change check | `collect.py`, `netparse/ios.py` | The IOS `Last configuration change` marker is read before and after collection. If it moved, the host fails loudly. If it can't be read (for example, an account below privilege 15), a warning says so. |
+| Verification after the run | `scripts/audit.py`, play 6 | Re-checks every recorded command and the configuration check, and fails the job on any problem. |
+| Command inventory test | `tests/test_readonly.py` | Checks every command any driver or feature can emit, enabled or not, against its platform's policy, and checks a list of dangerous commands is refused. A new command that isn't read-only fails the tests. |
+
+To see what would be sent without contacting anything:
+
+```bash
+python3 scripts/collect.py --plan --platform ios
+```
+
+The strongest guarantee is on the device side, and is recommended in
+production: give the collection account read-only rights, such as an IOS
+privilege level or TACACS+ command authorisation that permits only `show`
+and `terminal`, a PAN-OS read-only admin role, and a non-administrator
+Windows account. Device-side command accounting (TACACS+ or
+`archive log config`) then gives an independent record to compare with the
+audit.
 
 ## Building the diagram, step by step
 
@@ -214,8 +285,12 @@ inventory host, so a typo stops the run instead of silently dropping a node.
 
 To force the side of a node that its links attach to, add a custom property
 named `side` with the value `top`, `bottom`, `left` or `right` to that node in
-`template.drawio` (right-click > **Edit Data**). Without one, each node uses
-whichever side most of its links point towards.
+`template.drawio` (right-click > **Edit Data**). Every link of that node then
+attaches to that side. Without one, the side is chosen per link: if the two
+nodes' centres are within 40 pixels of each other vertically (the same row),
+the link leaves the right side of the left-hand node and enters the left side
+of the other. Otherwise it leaves the bottom of the upper node and enters the
+top of the lower one.
 
 #### Links and interface labels
 
@@ -342,6 +417,9 @@ its JSON can carry the tunnels already parsed, each with an optional explicit
 2. Add the name to `config.ENABLED_FEATURES`.
 3. Add sample device output under `tests/fixtures/` and a
    `tests/test_<name>.py`.
+4. Every command in `commands` must pass the platform's read-only policy.
+   `tests/test_readonly.py` checks this automatically, for every feature
+   whether it is enabled or not.
 
 ### Adding a device platform
 
@@ -350,10 +428,13 @@ what to run and tells `netparse` how to read the core output. To add one
 (NX-OS, EOS, PAN-OS and so on):
 
 1. Write `scripts/netparse/<platform>.py` with `CORE_COMMANDS`, optionally
-   `PAGING_COMMANDS`, and `parse(cli)`, which returns `hostname`,
-   `interfaces` and `interfaces_ip` in the same shape as `ios.py`.
+   `PAGING_COMMANDS` and `CONFIG_CHECK_COMMAND`, and `parse(cli)`, which
+   returns `hostname`, `interfaces` and `interfaces_ip` in the same shape as
+   `ios.py`.
 2. Register it in `_DRIVERS` and `_ALIASES` in `scripts/netparse/__init__.py`.
-3. For each feature that should work on the new platform, add its commands
+3. Add a read-only policy for it to `scripts/readonly.py`. Without one, the
+   collector refuses to contact the platform, and the tests fail.
+4. For each feature that should work on the new platform, add its commands
    and a parser to that feature.
 
 ## Configuration reference
@@ -439,24 +520,31 @@ python3 -m unittest discover -s tests
 The fixtures in `tests/fixtures/` describe a six-router topology with three
 IPsec tunnels. The tests cover the YAML parser, the IOS parsers, the SSH
 session driver (against a fake `ssh`), the feature framework, the IPsec
-feature, the C extension against the Python reference, and a full run of
-`main.py`.
+feature, the C extension against the Python reference, a full run of
+`main.py`, and the read-only safeguards. The fake `ssh` logs every line it
+receives, so the read-only tests compare what the "device" got with the
+audit record, and check that refused commands never reach it, that a
+confirmation prompt is cancelled rather than answered, and that a
+configuration change fails the host.
 
 ## Limitations and scaling
 
 ### Current limitations
 
-- Only Cisco IOS / IOS-XE is supported today. On any other platform the
-  collector logs in but has no commands to run, so the device appears as a
-  node with no links until a `netparse` module exists for it.
+- Only Cisco IOS / IOS-XE is supported today. The collector refuses to
+  contact a device on any other platform, because there is no read-only
+  policy for it yet. Palo Alto (direct and through Panorama) and Windows
+  Server (PowerShell over OpenSSH) are planned in the
+  [multi-vendor design](docs/design-archive/2026-10-26/multi-vendor-device-data-design.md).
 - Links come from IPv4 subnets. A device with only unnumbered or IPv6
   interfaces, or a pure layer-2 switch with no routed interfaces, won't
   connect to anything.
 - The design assumes point-to-point subnets (a /30 or /31 per link). Shared
   segments are drawn as a full mesh.
 - The IPsec path is the fewest-hops guess unless an explicit path is given.
-- Collection uses SSH and a CLI. Windows servers will need a different
-  collector (WinRM, for example) that writes the same JSON format.
+- Collection uses SSH and a CLI. Palo Alto will use the PAN-OS XML API, and
+  Windows will use PowerShell over OpenSSH, as described in the multi-vendor
+  design.
 
 ### Scaling to hundreds of devices
 
@@ -484,12 +572,22 @@ production run of hundreds of devices:
   That's fine for a scheduled AWX job, but 1,000 or more devices on one page
   would take several minutes.
 
-The planned way to scale is to split the network across draw.io pages (the
-tabs along the bottom), one per site or region, plus an overview page with
-one node per site. Each page is routed separately, which keeps routing fast
+Production is currently one site of a few hundred devices with no site
+mapping, so for now the work is on keeping one large page fast and small
+(the icon fix above). If draw.io's limits are reached, the way to scale is
+to split the network across draw.io pages (the tabs along the bottom), one
+per site, region or segment, plus an overview page with one node per site. Each page is routed separately, which keeps routing fast
 and each page readable. Layers then hold the detail within a page: VLANs,
 VRFs, tunnels, firewall zones.
 
 If even that outgrows draw.io, the collected JSON doesn't depend on it.
 Another renderer, such as an interactive web view with search and
 filtering, could be added alongside draw.io and read the same files.
+
+## Design history
+
+Design documents are kept in `docs/design-archive/`, one folder per date,
+so the reasoning behind each change stays readable after the code moves on.
+A later revision gets a new dated folder rather than editing an older one.
+See [docs/design-archive/README.md](docs/design-archive/README.md) for the
+index.

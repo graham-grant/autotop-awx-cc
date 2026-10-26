@@ -3,12 +3,14 @@ import unittest
 from unittest import mock
 
 import support
+import readonly
 from sshcli import AuthError, CliSession
 
 FAKE_SSH = str(support.ROOT / "tests" / "fake_ssh.py")
 
 
 def session(**kw):
+    kw.setdefault("policy", readonly.policy_for("ios"))
     return CliSession("sw", "admin", kw.pop("password", "secret"), ssh_binary=FAKE_SSH,
                       timeout=10, command_timeout=10, **kw)
 
@@ -70,6 +72,7 @@ class CollectTest(unittest.TestCase):
             rec = collect.collect("AT-8K-1", "sw", "ios", timeout=10, command_timeout=10)
         self.assertEqual(rec["inventory_name"], "AT-8K-1")
         self.assertEqual(list(rec["cli"]), ["show version", "show interfaces status"])
+        self.assertEqual(rec["audit"]["config_check"]["status"], "unchanged")
 
 
 if __name__ == "__main__":
