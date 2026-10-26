@@ -1,0 +1,14 @@
+# Inventory for the layer 2 fixtures in l2/ (no real devices).
+all:
+  children:
+    network_devices:
+      vars:
+        ansible_network_os: ios
+      hosts:
+        rtr1: {}
+        sw1: {}
+        sw2: {}
+    servers:
+      hosts:
+        srv1: {}
+        srv2: {}

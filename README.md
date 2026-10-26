@@ -13,12 +13,13 @@ job. See [Read-only collection](#read-only-collection).
 
 The diagram is built in two parts:
 
-- **The physical diagram.** One node per inventory device, one link for
-  every subnet two devices share, and a small segment node for a subnet
-  three or more devices share. Links are routed around the nodes so they
-  never overlap, and each end is labelled with its interface, coloured green
-  or red by link status.
-- **Feature layers.** Everything else (IPsec tunnels today; VRFs, VLANs,
+- **The physical diagram.** One node per inventory device and one link per
+  cable, found from LLDP/CDP neighbors, switch MAC address tables and shared
+  subnets, with a small segment node for a subnet three or more devices
+  share when nothing says how they're cabled. Links are routed around the
+  nodes so they never overlap, and each end is labelled with its interface,
+  coloured green or red by link status.
+- **Feature layers.** Everything else (IPsec tunnels and VLANs today; VRFs,
   firewall zones and so on later) is drawn by an independent feature plugin
   onto its own draw.io layer. Each layer can be shown or hidden in draw.io
   (**View > Layers**, or Ctrl+Shift+L), so a viewer turns on only what's
@@ -53,15 +54,16 @@ Contents:
 | `scripts/commands.py` | Works out which show commands to run on a device |
 | `scripts/readonly.py` | The read-only command policy every command must pass before it is sent |
 | `scripts/audit.py` | Re-checks the commands recorded for every device after collection |
-| `scripts/drivers/` | Platform drivers: turn each platform's output into the common device record (schema 2), one module per platform |
+| `scripts/drivers/` | Platform drivers: turn each platform's output into the common device record (schema 2), one module per platform, plus shared MAC and interface-name helpers (`common.py`) |
 | `scripts/main.py` | Entry point for building the diagram |
-| `scripts/parser.py` | Loads the JSON files and derives links from shared subnets |
+| `scripts/parser.py` | Loads the JSON files as schema 2 records |
+| `scripts/links.py` | Works out the links from LLDP/CDP, MAC tables and shared subnets |
 | `scripts/drawio_position_loader.py` | Reads and writes node positions in `template.drawio` |
 | `scripts/pathfinder.py` | The link router (Hanan grid + A* search) |
 | `scripts/csrc/_hanan.c`, `scripts/_hanan.abi3.so`, `scripts/build_ext.py` | The A* search in C, its prebuilt binary, and its build script |
 | `scripts/renderer.py` | Writes nodes, links and interface labels as draw.io XML |
 | `scripts/icon_library.py` | Reads the icon library so nodes can show device pictures |
-| `scripts/features/` | Feature plugins (`ipsec.py`) and their shared helpers |
+| `scripts/features/` | Feature plugins (`ipsec.py`, `vlans.py`) and their shared helpers |
 | `scripts/inventory.py`, `scripts/miniyaml.py` | Inventory reader and the small YAML parser it uses |
 | `scripts/config.py` | All tunable settings |
 | `tests/` | Unit and end-to-end tests with fixture device output |
@@ -139,8 +141,14 @@ which does the following:
    with a message telling you to attach the Network credential.
 2. It asks `commands.py` which commands to run. That list is the core
    commands for the device's platform plus every command an enabled feature
-   declares. On IOS / IOS-XE that's currently `show version`,
-   `show interfaces`, `show ip interface` and `show crypto session detail`.
+   declares. On IOS / IOS-XE the core commands are `show version`,
+   `show interfaces`, `show ip interface`, `show lldp neighbors detail`,
+   `show cdp neighbors detail`, `show ip arp` and
+   `show mac address-table dynamic`. The enabled features add
+   `show crypto session detail` (IPsec) and `show vlan brief` and
+   `show interfaces trunk` (VLANs). A command the device doesn't support
+   (a router with no MAC address table, LLDP turned off) is rejected by the
+   device, skipped, and leaves that part of the record empty.
 3. It opens one interactive SSH session to the device with `sshcli.py`. This
    runs the system `ssh` client through a pseudo-terminal and replies to
    prompts the way a person would: the SSH password prompt, a second
@@ -183,10 +191,17 @@ by the feature that draws it. **raw** keeps exactly what was collected.
                  "speed_mbps": 1000, "mtu": 1500, "description": "to core-rtr2",
                  "vrf": "default", "vlan": null, "parent": null,
                  "ipv4": ["10.0.12.1/30"], "ipv6": []}],
- "neighbors": [], "arp": [], "mac_table": [],
+ "neighbors": [{"local_intf": "GigabitEthernet1", "protocol": "cdp",
+                "remote_name": "core-sw1", "remote_intf": "GigabitEthernet1/0/1",
+                "remote_mac": null, "remote_ip": "10.0.12.2",
+                "remote_platform": "cisco C9300-24T", "remote_capabilities": ["bridge"]}],
+ "arp": [{"ip": "10.0.12.2", "mac": "00:a1:b2:c3:00:10", "intf": "GigabitEthernet1",
+          "vrf": "default"}],
+ "mac_table": [],
  "facets": {"ipsec": {"tunnels": [{"interface": "Tunnel10", "local_address": "172.16.0.1",
                                    "peer_address": "172.16.0.11", "status": "up",
-                                   "vendor_status": "UP-ACTIVE"}]}},
+                                   "vendor_status": "UP-ACTIVE"}]},
+            "vlans": {"vlans": [], "trunks": []}},
  "raw": {"show version": "...", "show interfaces": "...", "...": "..."},
  "audit": {"policy": "ios",
            "commands": [{"time": "2026-10-26T01:00:03+00:00", "command": "show version",
@@ -197,13 +212,21 @@ by the feature that draws it. **raw** keeps exactly what was collected.
 ```
 
 - `kind` is `physical`, `subinterface`, `lag`, `vlan`, `loopback`, `tunnel`
-  or `virtual`. `parent` is the parent interface of a subinterface.
+  or `virtual`. `parent` is the parent interface of a subinterface, or the
+  port-channel a physical port is a member of.
 - `vrf` comes from `show ip interface` on IOS, and is `default` for the
   global table.
-- `neighbors` (LLDP/CDP), `arp` and `mac_table` are part of the core but
-  are empty until phase 2 of the
-  [multi-vendor design](docs/design-archive/2026-10-26/multi-vendor-device-data-design.md)
-  collects them.
+- MAC addresses are always written `aa:bb:cc:dd:ee:ff`, and interface names
+  in full (`GigabitEthernet1/0/1`, not `Gi1/0/1`) wherever the device's own
+  output abbreviates them, so the core can be matched across devices.
+- `neighbors` holds one entry per LLDP or CDP neighbor. `remote_mac` is
+  set when the neighbor sends a MAC as its port id (most servers do), and
+  `remote_capabilities` uses `router`, `bridge`, `phone`, `wlan` and
+  `station`.
+- `arp` and `mac_table` (`{"mac", "intf", "vlan"}`) are learned dynamic
+  entries. CPU, router and drop entries are left out of the MAC table.
+- `facets.vlans` is described under
+  [VLANs](#vlans-featuresvlanspy).
 - Older files are upgraded when they are read: the earlier raw format
   (`"cli": {...}`) is parsed with the current driver, and the NAPALM-based
   format is converted. A file with a newer schema number than the code
@@ -275,17 +298,47 @@ audit.
 1. **Load.** `parser.py` reads every JSON file as a schema 2 record,
    upgrading older files (see [Device facts format](#device-facts-format)).
    With `--reparse`, each file is re-parsed from its raw output first.
-2. **Derive links.** Every interface address is grouped by subnet. A subnet
-   shared by exactly two devices becomes a link between them. That's what a
-   directly connected route means, so CDP and LLDP aren't needed. A subnet
-   only one device has (an uplink to something not in the inventory) is
-   skipped. Subnets in `config.EXCLUDED_NETWORKS` (such as a management
-   network) are ignored. A link is up unless either end reports its
-   interface as down.
+2. **Derive links** (`links.py`). Links come from three kinds of evidence,
+   most trusted first, and each link records which kinds it has:
+   - **`lldp` / `cdp`.** A neighbor entry names the exact cable, this port
+     to that port. Reports from both ends become one link. The neighbor is
+     matched to an inventory device by name (the FQDN's first label is
+     enough), management address or MAC.
+   - **`mac`.** If a device's interface MAC is learned on a switch port,
+     the device hangs off that port. This is how servers and firewalls that
+     don't run LLDP get placed. Uplinks are ignored: ports whose neighbor is
+     another switch, and ports that carry the MACs of more than one
+     inventory device (an unmanaged switch, say). If a device's MAC is on
+     several access ports, the port with the fewest MACs wins, and a tie
+     draws nothing and logs a note.
+   - **`subnet`.** Two devices with an address in the same IPv4 subnet are
+     directly connected, since that's what a connected route means. This
+     is the only evidence for routers that don't run LLDP or CDP. If a
+     subnet's devices are already joined by layer 2 links (directly, or
+     through switches), it adds no link of its own: a direct link just
+     gains `subnet` as extra evidence. A subnet only one device has (an
+     uplink to something not in the inventory) is skipped.
+
+   Port-channel members collapse into one link between the two
+   port-channels, labelled with the member count. A port-channel whose
+   members end on two switches (MC-LAG: vPC, MLAG, VSX) can't be one link,
+   so it's drawn as one link to each peer, with `MC-LAG` after the bundled
+   end's interface name. A bonded server found only by MAC table is
+   handled the same way: when its MAC is learned equally on port-channels
+   of two different switches, it's linked to both. (IOS-XE StackWise
+   Virtual and VSS run both chassis as one device, so their port-channels
+   collapse normally.) ARP tables are collected
+   but don't add links, since any IP neighbor ARP proves is also in a shared
+   subnet. `config.LINK_EVIDENCE` lists which kinds of evidence may draw a
+   link (all four by default). Subnets in `config.EXCLUDED_NETWORKS` (such
+   as a management network) are ignored. A link is up unless either end
+   reports its interface as down.
    - **Shared segments.** A subnet three or more devices share becomes a
      small rounded segment node, labelled with its network (and its VLAN,
      if every member's interface is on the same one), with one link from
-     each device to it. This replaces a full mesh, which grows with the
+     each device to it. With layer 2 data, a subnet's members are usually
+     already linked through their switches, so segment nodes appear only
+     where nothing says how the devices are cabled. This replaces a full mesh, which grows with the
      square of the number of devices.
    - **VRFs.** If the same address appears on two devices in one subnet,
      the subnet is being reused, so its members are grouped by VRF and each
@@ -352,10 +405,17 @@ top of the lower one.
 
 Each link is drawn as an orthogonal line between the two devices. At each
 end, a label shows the abbreviated interface name (`GigabitEthernet0/1`
-becomes `Gi0/1`), placed against the node. The label background is green if
+becomes `Gi0/1`), placed against the node, with `×2` (and so on) after a
+port-channel's name for its member count, and `MC-LAG` after one that is
+split across two switches. The label background is green if
 the link is up and red if either end reports it down. A device that reports
 no status for an interface counts as up, so this is a display aid, not a
 health check.
+
+A link found only from a MAC address table, with no LLDP or CDP entry to
+confirm the exact cable, is drawn dashed (`config.INFERRED_LINK_STYLE`).
+Hovering a link doesn't show its evidence yet; it's in `links.py`'s output
+for any feature that wants it.
 
 #### Link routing
 
@@ -476,6 +536,32 @@ into a device's facet:
                        "path": ["branch1", "isp-rtr", "hq"]}]}}
 ```
 
+#### VLANs (`features/vlans.py`)
+
+**Layer:** "VLANs". **Facet:** `vlans`, supplied on IOS / IOS-XE from
+`show vlan brief` and `show interfaces trunk`.
+
+What it shows: on each link, a short way out from a switch's end, what that
+switch port carries: `VLAN 10` for an access port, or `trunk 1,10,20` for a
+trunk (the VLANs both allowed and active, or the allowed list if the
+platform doesn't report active ones). Long trunk lists are cut short with
+`...`. Hovering a label shows the port, its mode, the native VLAN and the
+full list. Links to segment nodes aren't labelled, since the segment node
+already names its VLAN.
+
+The facet's shape, which every driver that supplies it fills the same way:
+
+```json
+"facets": {"vlans": {
+    "vlans":  [{"id": 10, "name": "SERVERS", "ports": ["GigabitEthernet1/0/5"]}],
+    "trunks": [{"port": "Port-channel1", "native": 1,
+                "allowed": "1-4094", "active": "1,10,20"}]}}
+```
+
+`vlans[].ports` are the access ports in each VLAN. The reserved VLANs
+1002 to 1005 are left out. Settings (`config.FEATURE_SETTINGS["vlans"]`):
+`offset` (how far out along the link), `max_chars`, `style`.
+
 #### Adding a feature
 
 1. Decide the facet's shape: the vendor-neutral data the feature needs,
@@ -520,6 +606,8 @@ All settings live in `scripts/config.py`:
 | `DEFAULT_FACTS_DIR`, `DEFAULT_OUTPUT_DIR` | Where JSON is read from and the diagram is written to |
 | `DEFAULT_INVENTORY_PATH`, `DEFAULT_TEMPLATE_PATH`, `DEFAULT_ICON_LIBRARY_PATH` | Inventory, position template and icon library |
 | `EXCLUDED_NETWORKS` | Subnets never drawn as links, including any smaller subnet inside them |
+| `LINK_EVIDENCE` | Which kinds of evidence may draw a link: `lldp`, `cdp`, `mac`, `subnet` |
+| `INFERRED_LINK_STYLE` | Style added to links found only from a MAC address table (dashed) |
 | `NEW_NODE_GRID_*` | Layout of the staging grid for new devices |
 | `DEFAULT_NODE_W`, `DEFAULT_NODE_H` | Node size when the inventory doesn't set `w` / `h` |
 | `SEGMENT_NODE_W`, `SEGMENT_NODE_H`, `SEGMENT_NODE_STYLE` | Size and style of shared-segment nodes |
@@ -527,7 +615,7 @@ All settings live in `scripts/config.py`:
 | `STATUS_UP_COLOR`, `STATUS_DOWN_COLOR` | Interface label colours |
 | `INTF_LABEL_STYLE`, `INTF_ABBREVIATIONS` | Interface label style and name abbreviations |
 | `ENABLED_FEATURES` | Features to run, in layer order |
-| `FEATURE_SETTINGS` | Per-feature overrides, such as `{"ipsec": {"up_color": "#0050EF"}}` |
+| `FEATURE_SETTINGS` | Per-feature overrides, such as `{"ipsec": {"up_color": "#0050EF"}}` or `{"vlans": {"offset": 50}}` |
 
 `main.py` also takes these on the command line:
 
@@ -595,14 +683,17 @@ readable reference, and the tests check that both produce identical routes.
 python3 -m unittest discover -s tests
 ```
 
-The fixtures in `tests/fixtures/` describe a six-router topology with three
-IPsec tunnels. The tests cover the YAML parser, the IOS parsers, the SSH
+The fixtures in `tests/fixtures/facts/` describe a six-router topology with
+three IPsec tunnels. `tests/fixtures/l2/` adds a layer 2 lab: a router, two
+switches joined by a two-member port-channel, and two servers that appear
+only in the switches' MAC tables. The tests cover the YAML parser, the IOS parsers, the SSH
 session driver (against a fake `ssh`), the feature framework, the IPsec
 feature, the C extension against the Python reference, a full run of
 `main.py`, the platform drivers and the facts format (including upgrading
 older files, and a check that schema 1 and schema 2 facts draw a
-byte-identical diagram), link inference (segments and VRF reuse), and the
-read-only safeguards. The fake `ssh` logs every line it
+byte-identical diagram), link inference (segments and VRF reuse), the
+layer 2 parsers, links from LLDP/CDP and MAC table evidence, port-channel
+collapse and the VLANs layer, and the read-only safeguards. The fake `ssh` logs every line it
 receives, so the read-only tests compare what the "device" got with the
 audit record, and check that refused commands never reach it, that a
 confirmation prompt is cancelled rather than answered, and that a
@@ -617,12 +708,19 @@ configuration change fails the host.
   policy for it yet. Palo Alto (direct and through Panorama) and Windows
   Server (PowerShell over OpenSSH) are planned in the
   [multi-vendor design](docs/design-archive/2026-10-26/multi-vendor-device-data-design.md).
-- Links come from IPv4 subnets. A device with only unnumbered or IPv6
-  interfaces, or a pure layer-2 switch with no routed interfaces, won't
-  connect to anything.
-- Shared segments are drawn as one node per subnet. Which device is plugged
-  into which switch port isn't known until phase 2 adds LLDP/CDP and MAC
-  tables.
+- A device that runs no LLDP or CDP, whose MAC no inventory switch has
+  learned, and that has only unnumbered or IPv6 interfaces won't connect to
+  anything.
+- MAC table evidence needs the device's interface MAC in its own record.
+  Servers and firewalls get that from their drivers in phases 3 and 4;
+  until then a server can be placed by its LLDP advertisement, or by a
+  hand-written schema 2 facts file.
+- `show ip arp` reads the global table only, so ARP entries in other VRFs
+  aren't collected. ARP doesn't draw links, so this only affects what's in
+  the facts files.
+- Several virtual machines behind one hypervisor port all appear on that
+  switch port, so the "more than one inventory device on the port" rule
+  leaves them to subnet evidence.
 - The IPsec path is the fewest-hops guess unless an explicit path is given.
 - Collection uses SSH and a CLI. Palo Alto will use the PAN-OS XML API, and
   Windows will use PowerShell over OpenSSH, as described in the multi-vendor

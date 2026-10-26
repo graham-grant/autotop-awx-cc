@@ -1,0 +1,39 @@
+{
+  "schema": 2,
+  "device": {
+    "name": "srv2",
+    "hostname": "srv2",
+    "role": "server",
+    "vendor": "microsoft",
+    "platform": "windows",
+    "model": null,
+    "os_version": "Windows Server 2022",
+    "serial": null,
+    "collected_at": null,
+    "collector": "fixture"
+  },
+  "interfaces": [
+    {
+      "name": "Ethernet0",
+      "kind": "physical",
+      "mac": "00:50:56:01:00:12",
+      "admin_up": true,
+      "oper_up": true,
+      "speed_mbps": 1000,
+      "mtu": 1500,
+      "description": "",
+      "vrf": "default",
+      "vlan": null,
+      "parent": null,
+      "ipv4": [
+        "10.0.10.12/24"
+      ],
+      "ipv6": []
+    }
+  ],
+  "neighbors": [],
+  "arp": [],
+  "mac_table": [],
+  "facets": {},
+  "raw": {}
+}

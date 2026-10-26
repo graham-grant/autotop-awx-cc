@@ -25,7 +25,7 @@ from config import (
     STATUS_UP_COLOR, STATUS_DOWN_COLOR, STATUS_DOT_SIZE,
     IP_LABEL_FRACTION, IP_LABEL_STYLE,
     INTF_LABEL_FRACTION, INTF_LABEL_STYLE, INTF_ABBREVIATIONS,
-    BLANK_LABEL, SEGMENT_NODE_STYLE,
+    BLANK_LABEL, SEGMENT_NODE_STYLE, INFERRED_LINK_STYLE,
 )
 from pathfinder import Node, LinkSpec, Point
 from icon_library import IconEntry
@@ -191,8 +191,15 @@ def render_tree(nodes, specs, edges_by_id, icons_by_id=None, icon_library=None, 
                 continue
             _apply_icon(cell, entry)
 
+    edge_cells = {c.get("id"): c for c in root.findall("mxCell") if c.get("edge") == "1"}
     for s in specs:
         edge = edges_by_id[s.id]
+
+        # A link placed by a MAC table, with no neighbor protocol to confirm
+        # the ports, is inferred: draw it dashed
+        evidence = edge.get("evidence") or []
+        if "mac" in evidence and not {"lldp", "cdp"} & set(evidence):
+            edge_cells[s.id].set("style", edge_cells[s.id].get("style") + INFERRED_LINK_STYLE)
 
         # Determine color based on link state
         color = STATUS_UP_COLOR if edge["is_up"] else STATUS_DOWN_COLOR
@@ -223,11 +230,18 @@ def render_tree(nodes, specs, edges_by_id, icons_by_id=None, icon_library=None, 
         src_style = base_intf + ("rotation=-90;" if s.src_side in ("top", "bottom") else "")
         dst_style = base_intf + ("rotation=-90;" if s.dst_side in ("top", "bottom") else "")
 
+        # Port-channels show their member count, "Po1 ×2", and an end whose
+        # port-channel is split across switches says so: "Po1 MC-LAG"
+        count = f" \u00d7{edge['members']}" if edge.get("members", 1) > 1 else ""
+        mclag = edge.get("mclag") or []
+
+        def intf_label(end):
+            return (abbreviate_intf(edge[f"{end}_intf"]) + count
+                    + (" MC-LAG" if end in mclag else ""))
+
         # Position at exactly -1.0 (source) and 1.0 (target) to pin directly against nodes
-        _add_edge_label(root, s.id, abbreviate_intf(edge["source_intf"]),
-                         -1.0, "intf-src", src_style)
+        _add_edge_label(root, s.id, intf_label("source"), -1.0, "intf-src", src_style)
         if edge["target_intf"]:  # links to a segment node have no far interface
-            _add_edge_label(root, s.id, abbreviate_intf(edge["target_intf"]),
-                             1.0, "intf-tgt", dst_style)
+            _add_edge_label(root, s.id, intf_label("target"), 1.0, "intf-tgt", dst_style)
 
     return mxfile

@@ -70,13 +70,13 @@ class LinkInferenceTest(unittest.TestCase):
         old = config.EXCLUDED_NETWORKS
         try:
             import ipaddress
-            facts_parser.EXCLUDED_NETWORKS = [ipaddress.ip_network("10.0.0.0/8")]
+            config.EXCLUDED_NETWORKS = [ipaddress.ip_network("10.0.0.0/8")]
             edges, _ = facts_parser.extract_links([
                 host("r1", ("Gi1", "10.0.0.1/30", "default", None, True)),
                 host("r2", ("Gi1", "10.0.0.2/30", "default", None, True))])
             self.assertEqual(edges, [])
         finally:
-            facts_parser.EXCLUDED_NETWORKS = old
+            config.EXCLUDED_NETWORKS = old
 
 
 def run_main(facts_dir, out_dir, template):

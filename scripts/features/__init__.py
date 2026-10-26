@@ -105,6 +105,20 @@ class Layer:
         self.cells.append(wrapper)
         return cid
 
+    def text(self, local_id, x, y, value, style, w=60, h=16, tooltip=None):
+        """A free-standing text label centred on (x, y)."""
+        cid = self._cell_id(local_id)
+        attrs = {"style": style, "vertex": "1", "connectable": "0", "parent": self.id}
+        if tooltip:
+            wrapper = ET.Element("object", {"id": cid, "label": value, "tooltip": tooltip})
+            cell = ET.SubElement(wrapper, "mxCell", attrs)
+        else:
+            wrapper = cell = ET.Element("mxCell", {"id": cid, "value": value, **attrs})
+        ET.SubElement(cell, "mxGeometry", {"x": f"{x - w / 2:.2f}", "y": f"{y - h / 2:.2f}",
+                                           "width": str(w), "height": str(h), "as": "geometry"})
+        self.cells.append(wrapper)
+        return cid
+
     def attach(self, root: ET.Element):
         ET.SubElement(root, "mxCell", {"id": self.id, "value": self.label, "parent": "0"})
         root.extend(self.cells)
