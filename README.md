@@ -1,7 +1,9 @@
 # autotop-awx: network topology diagrams from AWX
 
 This project logs in to the network devices in an Ansible inventory, collects
-their show-command output, and draws a draw.io diagram of how they connect.
+their show-command output (over SSH for Cisco, and over the PAN-OS XML API
+for Palo Alto firewalls, directly or through Panorama), and draws a draw.io
+diagram of how they connect.
 It runs as a single AWX job (or `ansible-playbook` by hand) and needs nothing
 beyond Ansible and a base Python 3.9+ install: no NAPALM, no Ansible
 collections, no PyYAML, nothing to `pip install`, and no compiler.
@@ -19,8 +21,8 @@ The diagram is built in two parts:
   share when nothing says how they're cabled. Links are routed around the
   nodes so they never overlap, and each end is labelled with its interface,
   coloured green or red by link status.
-- **Feature layers.** Everything else (IPsec tunnels and VLANs today; VRFs,
-  firewall zones and so on later) is drawn by an independent feature plugin
+- **Feature layers.** Everything else (IPsec tunnels, VLANs and firewall
+  zones today; VRFs and so on later) is drawn by an independent feature plugin
   onto its own draw.io layer. Each layer can be shown or hidden in draw.io
   (**View > Layers**, or Ctrl+Shift+L), so a viewer turns on only what's
   relevant to them.
@@ -51,10 +53,11 @@ Contents:
 | `CLAUDE.md` | Standing rules for anyone (or any assistant) changing the code |
 | `scripts/collect.py` | Logs in to one device and saves its show-command output as JSON |
 | `scripts/sshcli.py` | Interactive SSH session driver (system `ssh` client + a pseudo-terminal) |
+| `scripts/xmlapi.py` | PAN-OS XML API session (HTTPS, direct or through Panorama) with the same read-only guard |
 | `scripts/commands.py` | Works out which show commands to run on a device |
 | `scripts/readonly.py` | The read-only command policy every command must pass before it is sent |
 | `scripts/audit.py` | Re-checks the commands recorded for every device after collection |
-| `scripts/drivers/` | Platform drivers: turn each platform's output into the common device record (schema 2), one module per platform, plus shared MAC and interface-name helpers (`common.py`) |
+| `scripts/drivers/` | Platform drivers: turn each platform's output into the common device record (schema 2), one module per platform (`ios.py`, `panos.py`), plus shared MAC and interface-name helpers (`common.py`) |
 | `scripts/main.py` | Entry point for building the diagram |
 | `scripts/parser.py` | Loads the JSON files as schema 2 records |
 | `scripts/links.py` | Works out the links from LLDP/CDP, MAC tables and shared subnets |
@@ -63,7 +66,7 @@ Contents:
 | `scripts/csrc/_hanan.c`, `scripts/_hanan.abi3.so`, `scripts/build_ext.py` | The A* search in C, its prebuilt binary, and its build script |
 | `scripts/renderer.py` | Writes nodes, links and interface labels as draw.io XML |
 | `scripts/icon_library.py` | Reads the icon library so nodes can show device pictures |
-| `scripts/features/` | Feature plugins (`ipsec.py`, `vlans.py`) and their shared helpers |
+| `scripts/features/` | Feature plugins (`ipsec.py`, `vlans.py`, `zones.py`) and their shared helpers (`bundling.py`, `porttags.py`) |
 | `scripts/inventory.py`, `scripts/miniyaml.py` | Inventory reader and the small YAML parser it uses |
 | `scripts/config.py` | All tunable settings |
 | `tests/` | Unit and end-to-end tests with fixture device output |
@@ -81,10 +84,22 @@ all:
       hosts:
         core-rtr1:
           ansible_host: 10.0.0.1
-          ansible_network_os: ios     # ios / iosxe today
+          ansible_network_os: ios     # ios / iosxe, or panos (below)
           icon: "ASR1004 Front"       # optional: a title from docs/Prod_Library.xml
           w: 230                      # optional node size
           h: 42
+      children:
+        firewalls:
+          vars:
+            ansible_network_os: panos
+          hosts:
+            pa-fw1:                   # lab: straight to the firewall
+              ansible_host: 192.168.10.80
+              panos_ca_file: /etc/pki/lab-ca.pem
+            pa-prod-fw1:              # production: through Panorama
+              panos_via_panorama: true
+              panorama_host: 10.1.1.10
+              panos_serial: "007951000123456"
     artifact_server:
       hosts:
         diagram-host:
@@ -93,6 +108,20 @@ all:
 
 `icon`, `w` and `h` can also be set once for a whole group under `vars:`.
 A host-level value wins over a group value.
+
+Palo Alto firewalls are collected over the PAN-OS XML API on port 443
+(`ansible_port` overrides it). These host or group variables choose how:
+
+| Variable | Meaning |
+| --- | --- |
+| `panos_via_panorama: true` | Send every request to Panorama, which proxies it to this firewall. Without it, the collector calls the firewall's own `ansible_host`. |
+| `panorama_host` | Panorama's address, with `panos_via_panorama`. |
+| `panos_serial` | The firewall's serial number, with `panos_via_panorama`. Optional: if it's not set, the serial is looked up among Panorama's connected firewalls by the inventory name. Quote it, so YAML keeps any leading zeros. |
+| `panos_ca_file` | A CA bundle to verify the API certificate against. Certificates are always verified, against the system's CA store if this isn't set. |
+| `panos_verify_tls: false` | Turns certificate verification off for this host, for a lab firewall with a self-signed certificate. The job log warns about it. Prefer `panos_ca_file`. |
+
+A firewall's inventory name is what it's called on the diagram, and what
+Panorama is asked for when `panos_serial` isn't set, so use its hostname.
 
 ### Credentials
 
@@ -107,6 +136,16 @@ repository or passed on a command line.
   `NET_ENABLE_PASSWORD`).
 
 The older `NAPALM_USERNAME` / `NAPALM_PASSWORD` names are still accepted.
+
+Palo Alto firewalls and Panorama use the same credentials unless
+`PANOS_USERNAME` and `PANOS_PASSWORD` are set, which lets them have their
+own read-only admin account. In AWX that needs a custom credential type
+whose injector sets those two environment variables (with the password
+field marked secret), attached to the job template alongside the Network
+credential. The username and password are only ever sent once per host,
+in the body of the API's `type=keygen` login request. The API key it
+returns is kept in memory and sent in the body of each later request,
+never in a URL, the log or the facts file.
 
 ### SSH options
 
@@ -134,8 +173,9 @@ be refused, the job stops here, before any device is contacted.
 
 **Play 2: collect (every host in `network_devices`).**
 Ansible doesn't connect to the devices itself (`connection: local`). For each
-device, Ansible's normal forks run `scripts/collect.py` on the controller,
-which does the following:
+device, Ansible's normal forks run `scripts/collect.py` on the controller.
+For a Cisco device it does the following (a Palo Alto firewall is described
+after the list):
 
 1. It checks that a username and password were found. If not, the play fails
    with a message telling you to attach the Network credential.
@@ -168,6 +208,24 @@ which does the following:
    record of every line sent and the result of the configuration check.
    If the marker changed, the file is still written, and the host fails with
    exit code 3 and a `CONFIGURATION CHANGED DURING COLLECTION` message.
+
+For a Palo Alto firewall, `collect.py` uses `xmlapi.py` instead of SSH, with
+the same checks:
+
+1. It logs in to the firewall (or to Panorama) with one `type=keygen`
+   request and keeps the API key in memory.
+2. Through Panorama without a `panos_serial`, it asks Panorama for its
+   connected firewalls and picks the one whose hostname is the inventory
+   name.
+3. It reads the configuration-change marker, sends each request, and reads
+   the marker again. Each request is an XML API query, such as
+   `type=op&cmd=<show><interface>all</interface></show>`, checked against
+   the PAN-OS read-only policy and printed as it is sent. Through Panorama
+   each one also carries `target=<serial>`. The requests are
+   `show system info`, `show interface all`, `show arp`,
+   `show lldp neighbors all` and, for the IPsec layer, `show vpn flow`.
+4. The PAN-OS driver parses the XML responses, and the facts file is
+   written the same way, with the raw XML kept under `raw`.
 
 Collection is the only step that talks to the devices. Everything after it,
 features included, works from these JSON files.
@@ -226,7 +284,11 @@ by the feature that draws it. **raw** keeps exactly what was collected.
 - `arp` and `mac_table` (`{"mac", "intf", "vlan"}`) are learned dynamic
   entries. CPU, router and drop entries are left out of the MAC table.
 - `facets.vlans` is described under
-  [VLANs](#vlans-featuresvlanspy).
+  [VLANs](#vlans-featuresvlanspy), and `facets.zones` under
+  [Firewall zones](#firewall-zones-featureszonespy).
+- On PAN-OS, `vrf` is the interface's virtual router, `admin_up` and `mtu`
+  are `null` (the API doesn't report them), and `raw` is keyed by the XML
+  API request.
 - Older files are upgraded when they are read: the earlier raw format
   (`"cli": {...}`) is parsed with the current driver, and the NAPALM-based
   format is converted. A file with a newer schema number than the code
@@ -266,21 +328,23 @@ left to the command lists. The full design is in
 | Safeguard | Where | What it does |
 | --- | --- | --- |
 | Allowlist per platform | `scripts/readonly.py` | On IOS, only `show ...` with display filters after a pipe (`include`, `exclude`, `begin`, `section`, `count`), plus `terminal length 0`, `terminal width N` and `terminal datadump`, which affect only the current session. `show ... \| redirect`, `tee` and `append` are refused, because they write files. |
+| PAN-OS request policy | `scripts/readonly.py` (`XmlApiPolicy`) | XML API requests are checked by their parameters. `type=op` is allowed only when `cmd` is a single XML element tree whose root is `<show>`, with no DTD, entities, comments or processing instructions. `type=config` is allowed only with `action=get` or `action=show` under `/config`. `type=keygen` is allowed only as the login, once, first. `target=<serial>` is the only other parameter. Every other type (`commit`, `import`, `export`, `user-id` and so on), every other config action (`set`, `edit`, `delete`, `move` and so on) and any repeated parameter is refused. The client sends exactly the parameters the policy checked. |
 | Denylist of state-changing verbs | `scripts/readonly.py` | A command starting with, or abbreviating, a verb such as `configure`, `write`, `copy`, `reload`, `delete`, `erase`, `clear`, `debug`, `set`, `commit`, `request` or a PowerShell `Set-`/`New-`/`Remove-` verb is refused, even if an allowlist entry were wrong. |
 | Character check | `scripts/readonly.py` | Newlines, control characters, tabs and `?` are refused, so nothing can smuggle a second command onto the line. |
 | Fail closed | `scripts/readonly.py`, `collect.py` | A platform without a policy is never contacted. |
-| Enforced at the lowest layer | `scripts/sshcli.py` | `CliSession.run()` refuses to send anything the policy doesn't allow, and a session with no policy sends nothing. The only other input ever typed is the login answers, `enable` and `exit`. |
+| Enforced at the lowest layer | `scripts/sshcli.py`, `scripts/xmlapi.py` | `CliSession.run()` and `ApiSession.run()` refuse to send anything the policy doesn't allow, and a session with no policy sends nothing. The only other input ever typed over SSH is the login answers, `enable` and `exit`; over the API, the one login request. Plain http is refused except to localhost (the tests' fake API). |
 | Confirmations are never answered | `scripts/sshcli.py` | If a device asks `[confirm]`, `[yes/no]`, `(y/n)` or `...]?`, the session sends Ctrl-C, stops using the session and fails the host. A command that times out is also cancelled with Ctrl-C before anything else is sent. |
 | Plan before connecting | `collect.py --plan`, play 1 | Prints every command per platform and stops the job if any would be refused. |
 | Audit trail | `sshcli.py`, `collect.py` | Every line sent is printed in the job log and stored with a timestamp and outcome in the facts file. |
-| Configuration-change check | `collect.py`, `drivers/ios.py` | The IOS `Last configuration change` marker is read before and after collection. If it moved, the host fails loudly. If it can't be read (for example, an account below privilege 15), a warning says so. |
-| Verification after the run | `scripts/audit.py`, play 6 | Re-checks every recorded command and the configuration check, and fails the job on any problem. |
+| Configuration-change check | `collect.py`, `drivers/ios.py`, `drivers/panos.py` | A marker is read before and after collection: the `Last configuration change` line on IOS, and the newest commit job from `show jobs all` on PAN-OS (a commit is the only way a firewall's running configuration changes). If it moved, the host fails loudly. If it can't be read (for example, an IOS account below privilege 15), a warning says so. |
+| Verification after the run | `scripts/audit.py`, play 6 | Re-checks every recorded command or request and the configuration check, checks an API login came first, and fails the job on any problem. |
 | Command inventory test | `tests/test_readonly.py` | Checks every command any driver or feature can emit, enabled or not, against its platform's policy, and checks a list of dangerous commands is refused. A new command that isn't read-only fails the tests. |
 
 To see what would be sent without contacting anything:
 
 ```bash
 python3 scripts/collect.py --plan --platform ios
+python3 scripts/collect.py --plan --platform panos
 ```
 
 The strongest guarantee is on the device side, and is recommended in
@@ -481,7 +545,7 @@ fewest-hops path between two devices (which can cross a segment node).
 #### IPsec tunnels (`features/ipsec.py`)
 
 **Layer:** "IPsec tunnels". **Facet:** `ipsec`, supplied on IOS / IOS-XE
-from `show crypto session detail`.
+from `show crypto session detail`, and on PAN-OS from `show vpn flow`.
 
 What it shows: every IPsec tunnel between two inventory devices, drawn as a
 curved, dashed line that passes over every router the tunnel crosses.
@@ -494,9 +558,9 @@ How it works:
 1. **Read the sessions.** Each device's `ipsec` facet lists its sessions:
    tunnel interface, local address, peer address, and a status the driver
    normalises to `up`, `down` or `unknown` (the device's own word, such as
-   IOS `UP-ACTIVE`, is kept as `vendor_status`). On IOS the driver takes
-   the local address from the IKE SA line, or from the IPsec flow if IKE is
-   down.
+   IOS `UP-ACTIVE` or PAN-OS `active` and `init`, is kept as
+   `vendor_status`). On IOS the driver takes the local address from the IKE
+   SA line, or from the IPsec flow if IKE is down.
 2. **Find both ends.** Each peer address is looked up among every interface
    address on every device, loopbacks included. The device that owns it is
    the far end. A peer that isn't in the inventory is skipped.
@@ -518,8 +582,8 @@ How it works:
 Nothing in these steps depends on either end's vendor, so a tunnel from a
 Cisco router to a Palo Alto firewall is merged and drawn like any other, as
 long as each driver fills in the facet as described. `tests/test_ipsec.py`
-checks this with a Cisco end and a Palo Alto end written the way the PAN-OS
-driver will write it. One limit: if an end is behind NAT, its peer sees the
+checks this with a Cisco end and a Palo Alto end, and `tests/test_panos.py`
+draws a tunnel from the PAN-OS driver's own output to a Cisco router. One limit: if an end is behind NAT, its peer sees the
 translated address, which no inventory device owns, so only the other
 end's report can place the tunnel.
 
@@ -562,6 +626,31 @@ The facet's shape, which every driver that supplies it fills the same way:
 1002 to 1005 are left out. Settings (`config.FEATURE_SETTINGS["vlans"]`):
 `offset` (how far out along the link), `max_chars`, `style`.
 
+#### Firewall zones (`features/zones.py`)
+
+**Layer:** "Firewall zones". **Facet:** `zones`, supplied on PAN-OS from
+`show interface all`.
+
+What it shows: at each firewall end of a link, the security zone that
+interface is in (`untrust`, `trust`), in the zone's own colour. A port whose
+subinterfaces are in several zones (`ethernet1/4.20` in `dmz`,
+`ethernet1/4.30` in `guest`) is labelled with all of them. Hovering a label
+shows each interface, its zone and its virtual system.
+
+```json
+"facets": {"zones": {"zones": [
+    {"name": "trust", "vsys": "vsys1", "interfaces": ["ethernet1/2", "loopback.1"]}]}}
+```
+
+Settings (`config.FEATURE_SETTINGS["zones"]`): `offset`, `style`, `colors`
+(zone name to fill colour; `untrust` is red and `trust` green by default)
+and `palette` (other zones get a colour from it, chosen by name, so a zone
+keeps its colour on every firewall and every run).
+
+VLANs and zones both tag link ends, and share the code for it in
+`features/porttags.py`: a feature that labels ports only has to say what
+each port's label is.
+
 #### Adding a feature
 
 1. Decide the facet's shape: the vendor-neutral data the feature needs,
@@ -586,14 +675,18 @@ Device platforms are separate from features. All of a platform's vendor
 knowledge lives in one driver module. To add one (NX-OS, PAN-OS, Windows
 and so on):
 
-1. Write `scripts/drivers/<platform>.py` with `TRANSPORT`, `VENDOR`,
-   `CORE_COMMANDS`, optionally `PAGING_COMMANDS` and
-   `CONFIG_CHECK_COMMAND`, `FACET_COMMANDS`, `parse_core(raw)` (returning
-   `device`, `interfaces`, `neighbors`, `arp` and `mac_table` in the shape
-   above) and `parse_facets(raw)`. `ios.py` is the example.
+1. Write `scripts/drivers/<platform>.py` with `TRANSPORT` (`ssh-cli` or
+   `xml-api`), `VENDOR`, `CORE_COMMANDS`, optionally `PAGING_COMMANDS`,
+   `CONFIG_CHECK_COMMAND` and `config_marker(output)`, `FACET_COMMANDS`,
+   `parse_core(raw)` (returning `device`, `interfaces`, `neighbors`, `arp`
+   and `mac_table` in the shape above) and `parse_facets(raw)`. `ios.py`
+   (a CLI) and `panos.py` (an API) are the examples.
 2. Register it in `_DRIVERS` and `_ALIASES` in `scripts/drivers/__init__.py`.
-3. Add a read-only policy for it to `scripts/readonly.py`. Without one, the
-   collector refuses to contact the platform, and the tests fail.
+3. Add a read-only policy for it to `scripts/readonly.py`, and allowed and
+   refused examples to `tests/test_readonly.py`. Without a policy, the
+   collector refuses to contact the platform, and the tests fail. A new
+   transport also needs a session class with the same `run()` guard and
+   audit as `sshcli.CliSession`.
 4. Features need no changes: any facet the driver supplies is drawn by the
    feature that owns it.
 
@@ -608,14 +701,14 @@ All settings live in `scripts/config.py`:
 | `EXCLUDED_NETWORKS` | Subnets never drawn as links, including any smaller subnet inside them |
 | `LINK_EVIDENCE` | Which kinds of evidence may draw a link: `lldp`, `cdp`, `mac`, `subnet` |
 | `INFERRED_LINK_STYLE` | Style added to links found only from a MAC address table (dashed) |
-| `NEW_NODE_GRID_*` | Layout of the staging grid for new devices |
+| `NEW_NODE_GRID_*` | Layout of the staging grid for new devices. `NEW_NODE_GRID_MIN_GAP` is the least space left between staged nodes; the grid spreads out to keep it |
 | `DEFAULT_NODE_W`, `DEFAULT_NODE_H` | Node size when the inventory doesn't set `w` / `h` |
 | `SEGMENT_NODE_W`, `SEGMENT_NODE_H`, `SEGMENT_NODE_STYLE` | Size and style of shared-segment nodes |
 | `HANAN_*` | Link routing, see [Link routing](#link-routing) |
 | `STATUS_UP_COLOR`, `STATUS_DOWN_COLOR` | Interface label colours |
 | `INTF_LABEL_STYLE`, `INTF_ABBREVIATIONS` | Interface label style and name abbreviations |
 | `ENABLED_FEATURES` | Features to run, in layer order |
-| `FEATURE_SETTINGS` | Per-feature overrides, such as `{"ipsec": {"up_color": "#0050EF"}}` or `{"vlans": {"offset": 50}}` |
+| `FEATURE_SETTINGS` | Per-feature overrides, such as `{"ipsec": {"up_color": "#0050EF"}}`, `{"vlans": {"offset": 50}}` or `{"zones": {"colors": {"dmz": "#FFE6CC"}}}` |
 
 `main.py` also takes these on the command line:
 
@@ -686,14 +779,19 @@ python3 -m unittest discover -s tests
 The fixtures in `tests/fixtures/facts/` describe a six-router topology with
 three IPsec tunnels. `tests/fixtures/l2/` adds a layer 2 lab: a router, two
 switches joined by a two-member port-channel, and two servers that appear
-only in the switches' MAC tables. The tests cover the YAML parser, the IOS parsers, the SSH
+only in the switches' MAC tables. `tests/fixtures/panos/` holds a Palo
+Alto firewall's XML API responses, which `tests/fake_panos.py` serves as a
+fake firewall or Panorama on a local port. The tests cover the YAML parser, the IOS parsers, the SSH
 session driver (against a fake `ssh`), the feature framework, the IPsec
 feature, the C extension against the Python reference, a full run of
 `main.py`, the platform drivers and the facts format (including upgrading
 older files, and a check that schema 1 and schema 2 facts draw a
 byte-identical diagram), link inference (segments and VRF reuse), the
 layer 2 parsers, links from LLDP/CDP and MAC table evidence, port-channel
-collapse and the VLANs layer, and the read-only safeguards. The fake `ssh` logs every line it
+collapse and the VLANs layer, the PAN-OS driver, XML API sessions
+(directly, through Panorama, and over HTTPS with certificate checks),
+the zones layer, a mixed Cisco and Palo Alto diagram, and the read-only
+safeguards, for both the SSH and the API policies. The fake `ssh` logs every line it
 receives, so the read-only tests compare what the "device" got with the
 audit record, and check that refused commands never reach it, that a
 confirmation prompt is cancelled rather than answered, and that a
@@ -703,11 +801,24 @@ configuration change fails the host.
 
 ### Current limitations
 
-- Only Cisco IOS / IOS-XE is supported today. The collector refuses to
-  contact a device on any other platform, because there is no read-only
-  policy for it yet. Palo Alto (direct and through Panorama) and Windows
-  Server (PowerShell over OpenSSH) are planned in the
+- Cisco IOS / IOS-XE and Palo Alto PAN-OS are supported today. The
+  collector refuses to contact a device on any other platform, because
+  there is no read-only policy for it yet. Windows Server (PowerShell over
+  OpenSSH) is planned in the
   [multi-vendor design](docs/design-archive/2026-10-26/multi-vendor-device-data-design.md).
+- The PAN-OS parsers are written against the documented XML API output and
+  tested with fixtures, not yet against the lab firewall. If a field turns
+  out to be named differently, the raw XML is kept, so after the parser is
+  fixed `main.py --reparse` corrects existing files without collecting
+  again.
+- PAN-OS doesn't report aggregate (`ae`) membership in `show interface all`,
+  so a firewall's LAG members don't collapse into one link from the
+  firewall's side alone. The switch's port-channel still does. Firewall
+  interfaces in layer 2 mode aren't read as a MAC table, and an HA pair is
+  drawn as two separate firewalls.
+- Zones are drawn as coloured labels on each firewall link, not as shaded
+  areas around interfaces, because interfaces only exist on the diagram
+  as link ends.
 - A device that runs no LLDP or CDP, whose MAC no inventory switch has
   learned, and that has only unnumbered or IPv6 interfaces won't connect to
   anything.
@@ -722,9 +833,8 @@ configuration change fails the host.
   switch port, so the "more than one inventory device on the port" rule
   leaves them to subnet evidence.
 - The IPsec path is the fewest-hops guess unless an explicit path is given.
-- Collection uses SSH and a CLI. Palo Alto will use the PAN-OS XML API, and
-  Windows will use PowerShell over OpenSSH, as described in the multi-vendor
-  design.
+- Windows will use PowerShell over OpenSSH, as described in the
+  multi-vendor design.
 
 ### Scaling to hundreds of devices
 

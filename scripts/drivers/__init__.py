@@ -23,9 +23,11 @@ physical diagram reads. Facets are optional, one documented shape each,
 owned by the feature that draws it. Raw output is always kept, so a parser
 fix can be applied to old files with reparse() without logging in again.
 
-A driver module declares TRANSPORT ("ssh-cli"), VENDOR, CORE_COMMANDS,
-optional PAGING_COMMANDS and CONFIG_CHECK_COMMAND, FACET_COMMANDS
-({facet: [commands]}), parse_core(raw) and parse_facets(raw).
+A driver module declares TRANSPORT ("ssh-cli" or "xml-api"), VENDOR,
+CORE_COMMANDS, optional PAGING_COMMANDS, CONFIG_CHECK_COMMAND and
+config_marker(output), FACET_COMMANDS ({facet: [commands]}),
+parse_core(raw) and parse_facets(raw). For "xml-api" a command is an API
+request's query string (see readonly.XmlApiPolicy).
 
 Adding a platform: write the module, add it to _DRIVERS / _ALIASES below,
 and give it a read-only policy in scripts/readonly.py - without one the
@@ -33,15 +35,16 @@ collector refuses to contact it.
 """
 from __future__ import annotations
 
-from drivers import ios
+from drivers import ios, panos
 
 SCHEMA = 2
 
-_DRIVERS = {"ios": ios}
+_DRIVERS = {"ios": ios, "panos": panos}
 
 # Ansible network_os / NAPALM driver names -> driver
 _ALIASES = {
     "ios": "ios", "iosxe": "ios", "ios-xe": "ios", "cisco.ios.ios": "ios",
+    "panos": "panos", "pan-os": "panos", "paloaltonetworks.panos": "panos",
 }
 
 # Tried in order after login when a driver doesn't say; an unknown one just
@@ -76,6 +79,19 @@ def config_check_command(network_os: str) -> str | None:
     """A read-only command whose output changes whenever the device's
     configuration does, or None if the platform has none."""
     return getattr(driver_for(network_os), "CONFIG_CHECK_COMMAND", None)
+
+
+def config_marker(network_os: str, output: str) -> str | None:
+    """The part of the config check command's output that only changes with
+    the configuration: the driver's config_marker(output) if it has one,
+    otherwise the whole output."""
+    extract = getattr(driver_for(network_os), "config_marker", None)
+    return extract(output) if extract else output.strip()
+
+
+def transport(network_os: str) -> str | None:
+    """How a platform is collected: "ssh-cli" or "xml-api"."""
+    return getattr(driver_for(network_os), "TRANSPORT", None)
 
 
 def facet_commands(network_os: str, facets=None) -> list[str]:

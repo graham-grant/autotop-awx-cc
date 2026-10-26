@@ -27,6 +27,7 @@ NEW_NODE_GRID_COLS = 5
 NEW_NODE_GRID_SPACING_X = 200
 NEW_NODE_GRID_SPACING_Y = 120
 NEW_NODE_GRID_TOP_MARGIN = 100  # gap below the lowest existing node
+NEW_NODE_GRID_MIN_GAP = 80      # the spacing grows so staged nodes are at least this far apart
 
 # ---------------------------------------------------------------------------
 # Link filtering
@@ -115,7 +116,7 @@ BLANK_LABEL = "\u200b"
 # on top of the physical diagram. Order here = layer stacking order.
 # None enables every feature module found.
 # ---------------------------------------------------------------------------
-ENABLED_FEATURES = ["ipsec", "vlans"]
+ENABLED_FEATURES = ["ipsec", "vlans", "zones"]
 
 # Per-feature overrides of each feature's SETTINGS defaults, e.g.
 #   FEATURE_SETTINGS = {"ipsec": {"up_color": "#0050EF", "lane_spacing": 12}}

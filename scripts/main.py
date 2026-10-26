@@ -74,12 +74,23 @@ def _parse_path_arg(argv, flag, default):
     return default
 
 
-def _place_unpinned_nodes(pinned, unpinned_names):
+def _place_unpinned_nodes(pinned, unpinned_names, sizes=None):
     """Simple staging-grid placement for any node with no position in
     template.drawio yet. No layout library involved - just somewhere
     visible below whatever's already pinned, meant to be dragged into
     place by hand on the next pass rather than auto-arranged well.
+
+    The grid's pitch grows to fit the largest staged node plus
+    NEW_NODE_GRID_MIN_GAP, so staged nodes never overlap (overlapping nodes
+    can wall a link's port in, and the router then finds no route).
     """
+    sizes = sizes or {}
+    widest = max((sizes.get(n, (config.DEFAULT_NODE_W, 0))[0] for n in unpinned_names),
+                 default=config.DEFAULT_NODE_W)
+    tallest = max((sizes.get(n, (0, config.DEFAULT_NODE_H))[1] for n in unpinned_names),
+                  default=config.DEFAULT_NODE_H)
+    pitch_x = max(config.NEW_NODE_GRID_SPACING_X, widest + config.NEW_NODE_GRID_MIN_GAP)
+    pitch_y = max(config.NEW_NODE_GRID_SPACING_Y, tallest + config.NEW_NODE_GRID_MIN_GAP)
     if pinned:
         bottom = max(p["y"] for p in pinned.values()) + config.DEFAULT_NODE_H / 2
         left = min(p["x"] for p in pinned.values()) - config.DEFAULT_NODE_W / 2
@@ -90,8 +101,8 @@ def _place_unpinned_nodes(pinned, unpinned_names):
     positions = {}
     for i, name in enumerate(unpinned_names):
         col, row = i % config.NEW_NODE_GRID_COLS, i // config.NEW_NODE_GRID_COLS
-        cx = left + col * config.NEW_NODE_GRID_SPACING_X + config.DEFAULT_NODE_W / 2
-        cy = start_y + row * config.NEW_NODE_GRID_SPACING_Y + config.DEFAULT_NODE_H / 2
+        cx = left + col * pitch_x + config.DEFAULT_NODE_W / 2
+        cy = start_y + row * pitch_y + config.DEFAULT_NODE_H / 2
         positions[name] = (cx, cy)
     return positions
 
@@ -163,8 +174,11 @@ def main():
     pinned = {k: v for k, v in pinned.items()  # drop segments that no longer exist
               if not k.startswith(parser.SEGMENT_PREFIX) or k in segment_ids}
 
+    # Dynamically evaluate sizes from inventory.yml before falling back to defaults
+    sizes = _load_node_sizes(inventory_path, node_names)
+
     unpinned = [name for name in node_names if name not in pinned]
-    new_positions = _place_unpinned_nodes(pinned, unpinned) if unpinned else {}
+    new_positions = _place_unpinned_nodes(pinned, unpinned, sizes) if unpinned else {}
     if unpinned:
         print(f"Note: {len(unpinned)} node(s) have no position in template.drawio yet, "
               f"placed in a staging grid: {', '.join(unpinned)}")
@@ -176,8 +190,6 @@ def main():
         elif name in new_positions:
             centers[name] = new_positions[name]
 
-    # Dynamically evaluate sizes from inventory.yml before falling back to defaults
-    sizes = _load_node_sizes(inventory_path, node_names)
     sizes.update({sid: (config.SEGMENT_NODE_W, config.SEGMENT_NODE_H) for sid in segment_ids})
     centers.update(_place_segments(segments, centers, sizes))
     preferred_sides = {name: p["side"] for name, p in pinned.items() if "side" in p}

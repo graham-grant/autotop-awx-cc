@@ -22,23 +22,10 @@ labelled.
 """
 from __future__ import annotations
 
-import math
-
-from features import Feature
+from features.porttags import PortTagFeature
 
 
-def _along(points, distance):
-    """The point `distance` along a polyline from its first point."""
-    for (x1, y1), (x2, y2) in zip(points, points[1:]):
-        seg = math.hypot(x2 - x1, y2 - y1)
-        if seg >= distance and seg > 0:
-            f = distance / seg
-            return x1 + (x2 - x1) * f, y1 + (y2 - y1) * f
-        distance -= seg
-    return points[-1]
-
-
-class VlansFeature(Feature):
+class VlansFeature(PortTagFeature):
     name = "vlans"
     label = "VLANs"
     facet = "vlans"
@@ -63,40 +50,6 @@ class VlansFeature(Feature):
             if port in v.get("ports", []):
                 return f"VLAN {v['id']}", f"{port}: access, VLAN {v['id']} ({v.get('name', '')})"
         return None
-
-    def collect(self, topo):
-        labels = []  # (edge id, end "source"/"target", text, tooltip)
-        for e in topo.edges:
-            if e.get("segment"):
-                continue
-            for end in ("source", "target"):
-                host = e[end]
-                facet = topo.facet(host, self.facet) if host in topo.hosts else None
-                if not facet:
-                    continue
-                found = self.port_label(facet, e[f"{end}_intf"])
-                if found:
-                    labels.append((e["id"], end, *found))
-        return labels
-
-    def plan(self, labels, topo):
-        placed = []
-        for edge_id, end, text, tip in labels:
-            spec = topo.specs.get(edge_id)
-            if spec is None or not spec.segments:
-                continue
-            pts = [(spec.segments[0].p1.x, spec.segments[0].p1.y)]
-            pts += [(s.p2.x, s.p2.y) for s in spec.segments]
-            if end == "target":
-                pts = pts[::-1]
-            x, y = _along(pts, self.settings["offset"])
-            placed.append((f"{edge_id}-{end}", x, y, text, tip))
-        return placed
-
-    def render(self, placed, layer):
-        for local_id, x, y, text, tip in placed:
-            layer.text(local_id, x, y, text, self.settings["style"],
-                       w=max(40, 6 * len(text)), h=14, tooltip=tip)
 
 
 FEATURE = VlansFeature()

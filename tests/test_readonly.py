@@ -59,10 +59,77 @@ IOS_REFUSED = [
     "Set-NetAdapter -Name x", "Restart-Computer", "Remove-Item C:\\x",
 ]
 
+PANOS_ALLOWED = [
+    "type=keygen",
+    "type=op&cmd=<show><system><info></info></system></show>",
+    "type=op&cmd=<show><interface>all</interface></show>",
+    "type=op&cmd=<show><arp><entry name='all'/></arp></show>",
+    "type=op&cmd=<show><jobs><all></all></jobs></show>",
+    "type=op&cmd=<show><devices><connected></connected></devices></show>",
+    "type=op&cmd=<show><vpn><flow></flow></vpn></show>&target=007951000123456",
+    "type=config&action=get&xpath=/config/devices/entry/vsys",
+    "type=config&action=show&xpath=/config",
+    "type=config&action=show&xpath=/config/shared&target=007951000123456",
+]
+
+PANOS_REFUSED = [
+    # other request types change things, or move data on or off the box
+    "type=commit&cmd=<commit></commit>", "type=import&category=software",
+    "type=export&category=configuration", "type=user-id&cmd=<uid-message/>",
+    "type=report&reporttype=dynamic", "type=log&log-type=traffic", "type=version",
+    "cmd=<show><system><info/></system></show>",
+    # op commands that aren't <show>
+    "type=op&cmd=<request><restart><system></system></restart></request>",
+    "type=op&cmd=<set><cli><pager>off</pager></cli></set>",
+    "type=op&cmd=<clear><session><all/></session></clear>",
+    "type=op&cmd=<debug><dataplane/></debug>", "type=op&cmd=<test><vpn/></test>",
+    "type=op&cmd=<commit></commit>", "type=op&cmd=<load><config/></load>",
+    "type=op&cmd=<save><config/></save>", "type=op&cmd=<revert><config/></revert>",
+    # config actions that write
+    "type=config&action=set&xpath=/config/devices&element=<x/>",
+    "type=config&action=edit&xpath=/config/devices&element=<x/>",
+    "type=config&action=delete&xpath=/config/devices/entry",
+    "type=config&action=rename&xpath=/config/x&newname=y",
+    "type=config&action=move&xpath=/config/x&where=top",
+    "type=config&action=clone&xpath=/config/x&from=y&newname=z",
+    "type=config&action=override&xpath=/config/x&element=<x/>",
+    "type=config&action=multi-move&xpath=/config/x",
+    "type=config&action=complete&xpath=/config/x",
+    "type=config&action=get&xpath=/operations", "type=config&action=get",
+    "type=config&action=get&xpath=/config&element=<x/>",
+    # smuggling: a second element, a repeated parameter, encoded or entity
+    # tricks, malformed XML, keygen with credentials in the checked string
+    "type=op&cmd=<show></show><request></request>",
+    "type=op&cmd=<show></show>&cmd=<request></request>",
+    "type=op&type=commit&cmd=<show></show>",
+    "type=op&cmd=%3Crequest%3E%3Crestart%3E%3Csystem/%3E%3C/restart%3E%3C/request%3E",
+    "type=op&cmd=<!DOCTYPE x [<!ENTITY a 'b'>]><show>&a;</show>",
+    "type=op&cmd=<?xml version='1.0'?><request/>", "type=op&cmd=<show><!-- x --></show>",
+    "type=op&cmd=<show><system>", "type=op&cmd=", "type=op",
+    "type=op&cmd=<show></show>\ntype=commit", "type=op&cmd=<show>\t</show>",
+    " type=op&cmd=<show></show>", "type=keygen&user=admin&password=x",
+    "type=op&cmd=<show></show>&target=../../x", "type=op&cmd=<show></show>&target=",
+    "type=op&cmd=<show></show>&key=abc", "type=op&cmd=<show></show>&vsys=vsys1",
+    # CLI text is not an API request
+    "show system info", "configure", "commit", "",
+]
+
 
 class PolicyTest(unittest.TestCase):
     def setUp(self):
         self.ios = readonly.policy_for("ios")
+
+    def test_panos_allowed(self):
+        policy = readonly.policy_for("panos")
+        for request in PANOS_ALLOWED:
+            with self.subTest(request=request):
+                self.assertEqual(policy.check(request), request)
+
+    def test_panos_refused(self):
+        policy = readonly.policy_for("panos")
+        for request in PANOS_REFUSED:
+            with self.subTest(request=request), self.assertRaises(readonly.CommandRefused):
+                policy.check(request)
 
     def test_allowed(self):
         for cmd in IOS_ALLOWED:
