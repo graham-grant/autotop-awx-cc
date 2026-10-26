@@ -320,7 +320,14 @@ audit.
      uplink to something not in the inventory) is skipped.
 
    Port-channel members collapse into one link between the two
-   port-channels, labelled with the member count. ARP tables are collected
+   port-channels, labelled with the member count. A port-channel whose
+   members end on two switches (MC-LAG: vPC, MLAG, VSX) can't be one link,
+   so it's drawn as one link to each peer, with `MC-LAG` after the bundled
+   end's interface name. A bonded server found only by MAC table is
+   handled the same way: when its MAC is learned equally on port-channels
+   of two different switches, it's linked to both. (IOS-XE StackWise
+   Virtual and VSS run both chassis as one device, so their port-channels
+   collapse normally.) ARP tables are collected
    but don't add links, since any IP neighbor ARP proves is also in a shared
    subnet. `config.LINK_EVIDENCE` lists which kinds of evidence may draw a
    link (all four by default). Subnets in `config.EXCLUDED_NETWORKS` (such
@@ -399,7 +406,8 @@ top of the lower one.
 Each link is drawn as an orthogonal line between the two devices. At each
 end, a label shows the abbreviated interface name (`GigabitEthernet0/1`
 becomes `Gi0/1`), placed against the node, with `×2` (and so on) after a
-port-channel's name for its member count. The label background is green if
+port-channel's name for its member count, and `MC-LAG` after one that is
+split across two switches. The label background is green if
 the link is up and red if either end reports it down. A device that reports
 no status for an interface counts as up, so this is a display aid, not a
 health check.

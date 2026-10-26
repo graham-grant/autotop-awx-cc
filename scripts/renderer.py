@@ -230,14 +230,18 @@ def render_tree(nodes, specs, edges_by_id, icons_by_id=None, icon_library=None, 
         src_style = base_intf + ("rotation=-90;" if s.src_side in ("top", "bottom") else "")
         dst_style = base_intf + ("rotation=-90;" if s.dst_side in ("top", "bottom") else "")
 
-        # Port-channels show their member count: "Po1 ×2"
+        # Port-channels show their member count, "Po1 ×2", and an end whose
+        # port-channel is split across switches says so: "Po1 MC-LAG"
         count = f" \u00d7{edge['members']}" if edge.get("members", 1) > 1 else ""
+        mclag = edge.get("mclag") or []
+
+        def intf_label(end):
+            return (abbreviate_intf(edge[f"{end}_intf"]) + count
+                    + (" MC-LAG" if end in mclag else ""))
 
         # Position at exactly -1.0 (source) and 1.0 (target) to pin directly against nodes
-        _add_edge_label(root, s.id, abbreviate_intf(edge["source_intf"]) + count,
-                         -1.0, "intf-src", src_style)
+        _add_edge_label(root, s.id, intf_label("source"), -1.0, "intf-src", src_style)
         if edge["target_intf"]:  # links to a segment node have no far interface
-            _add_edge_label(root, s.id, abbreviate_intf(edge["target_intf"]) + count,
-                             1.0, "intf-tgt", dst_style)
+            _add_edge_label(root, s.id, intf_label("target"), 1.0, "intf-tgt", dst_style)
 
     return mxfile

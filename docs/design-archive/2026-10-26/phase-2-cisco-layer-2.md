@@ -40,6 +40,8 @@ Evidence is applied in this order, and each link keeps a list of the kinds that 
    - A pair already linked by LLDP/CDP gets no second link.
 3. **Subnet.** The phase 1 rule, with one addition. If the subnet's members are already all joined by layer 2 links, directly or through switches that aren't members, no link or segment node is added. A direct layer 2 link between two members gains `subnet` as extra evidence, and their addresses fill in the link's IP labels.
 
+**MC-LAG.** A port-channel whose members end on two or more switches (vPC, MLAG, VSX) can't collapse into one link, because a link has one device at each end. It's drawn as one link to each peer, marked `mclag` at the bundled end and labelled `Po1 MC-LAG` there. The same applies to MAC evidence: a bonded server's single MAC is learned on the port-channel of each peer, which would otherwise be a tie and draw nothing, so a tie between port-channels on different switches links the server to each of them. A tie between plain access ports, or between two port-channels on one switch, is still skipped. IOS-XE StackWise Virtual and VSS make both chassis one device, so they need none of this. The project owner raised MC-LAG during review of this phase.
+
 `config.LINK_EVIDENCE` (default: all four kinds) says which kinds may draw a link. Taking out `mac` and `subnet` draws only cabling confirmed by LLDP/CDP.
 
 ## Where this differs from the design

@@ -21,7 +21,10 @@ ARP tables are collected (they're in the core) but don't add links of their
 own: any IP neighbour that ARP proves is also in a shared subnet.
 
 Port-channel members collapse into one link between the port-channels,
-with a member count. Each link records its evidence, and
+with a member count. A port-channel split across two switches (MC-LAG:
+vPC, MLAG, VSX) can't collapse into one link, since it ends on two
+devices: it's drawn as one link to each peer, and those links are marked
+"mclag" at the bundled end. Each link records its evidence, and
 config.LINK_EVIDENCE says which kinds are drawn.
 
 VRFs: VRF names only mean something on one device (a PE's "CUST" VRF and
@@ -32,8 +35,9 @@ false links.
 
 extract_links(records) -> (edges, segments). Each edge: id, source, target,
 source_intf, target_intf, source_ip, target_ip, is_up, evidence (list),
-members (port-channel member count, 1 otherwise), and "segment" for links
-to a segment node. Each segment: id, label, network, vrf, members.
+members (port-channel member count, 1 otherwise), "mclag" (the ends,
+"source" and/or "target", whose port-channel is split across several
+switches; only on such links) and "segment" for links to a segment node. Each segment: id, label, network, vrf, members.
 """
 from __future__ import annotations
 
@@ -105,6 +109,10 @@ class _Index:
         return intf.get("parent") if intf.get("kind") != "subinterface" and intf.get("parent") \
             else intf_name
 
+    def is_lag(self, host, intf_name) -> bool:
+        intf = drivers.interface(self.by_name[host], intf_name) or {}
+        return intf.get("kind") == "lag"
+
     def is_switch(self, host) -> bool:
         rec = self.by_name[host]
         return bool(rec.get("mac_table")) or rec["device"].get("role") == "switch"
@@ -149,10 +157,12 @@ def _uplinks(idx: _Index, neighbor_links) -> set:
 
 
 def _mac_links(idx: _Index, uplinks, linked_pairs):
-    """[(switch, port, host, host_intf)] from MAC tables: a port that has
-    learned the MAC of exactly one other inventory device, and isn't an
-    uplink. If a device shows up on several such ports, the port with the
-    fewest MACs wins (uplinks to unmanaged switches carry many)."""
+    """[(switch, port, host, host_intf, mclag)] from MAC tables: a port
+    that has learned the MAC of exactly one other inventory device, and
+    isn't an uplink. If a device shows up on several such ports, the port
+    with the fewest MACs wins (uplinks to unmanaged switches carry many).
+    A tie between port-channels on different switches is an MC-LAG: the
+    device's bundle ends on each of them, so each gets a link (mclag True)."""
     candidates = defaultdict(list)  # host -> [(total macs on port, switch, port, intf)]
     for switch, rec in idx.by_name.items():
         per_port = defaultdict(set)
@@ -173,12 +183,18 @@ def _mac_links(idx: _Index, uplinks, linked_pairs):
     links = []
     for host, options in sorted(candidates.items()):
         options.sort()
-        if len(options) > 1 and options[0][0] == options[1][0]:
-            print(f"Note: {host}'s MAC is learned on {len(options)} access ports equally - "
+        best = [o for o in options if o[0] == options[0][0]]
+        if len(best) > 1:
+            if len({o[1] for o in best}) == len(best) and \
+                    all(idx.is_lag(switch, port) for _, switch, port, _ in best):
+                links += [(switch, port, host, host_intf, True)
+                          for _, switch, port, host_intf in best]
+                continue
+            print(f"Note: {host}'s MAC is learned on {len(best)} access ports equally - "
                   f"not drawing a MAC-table link for it.")
             continue
         _, switch, port, host_intf = options[0]
-        links.append((switch, port, host, host_intf))
+        links.append((switch, port, host, host_intf, False))
     return links
 
 
@@ -237,19 +253,30 @@ def extract_links(records):
         g = grouped.setdefault(key, {"evidence": set(), "members": []})
         g["evidence"] |= protocols
         g["members"].append((ai, bi))
+    # A port-channel whose members reach two or more devices is an MC-LAG
+    peers = defaultdict(set)
+    for (a, ap), (b, bp) in grouped:
+        peers[(a, ap)].add(b)
+        peers[(b, bp)].add(a)
     l2_pairs = set()
     for ((a, ap), (b, bp)), g in grouped.items():
         evidence = [p for p in ("lldp", "cdp") if p in g["evidence"]]
         if not set(evidence) & allowed:
             continue
-        add_edge(a, ap, b, bp, evidence, members=len(g["members"]))
+        edge = add_edge(a, ap, b, bp, evidence, members=len(g["members"]))
+        mclag = [end for end, x, xp in (("source", a, ap), ("target", b, bp))
+                 if len(peers[(x, xp)]) > 1 and idx.is_lag(x, xp)]
+        if mclag:
+            edge["mclag"] = mclag
         l2_pairs.add(frozenset((a, b)))
 
     # 2. MAC tables
     if "mac" in allowed:
         uplinks = _uplinks(idx, neighbor_links)
-        for switch, port, host, host_intf in _mac_links(idx, uplinks, l2_pairs):
-            add_edge(switch, port, host, host_intf, ["mac"])
+        for switch, port, host, host_intf, mclag in _mac_links(idx, uplinks, l2_pairs):
+            edge = add_edge(switch, port, host, host_intf, ["mac"])
+            if mclag:
+                edge["mclag"] = ["target"]
             l2_pairs.add(frozenset((switch, host)))
 
     # 3. Shared subnets

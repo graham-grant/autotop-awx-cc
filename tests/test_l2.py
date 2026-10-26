@@ -151,17 +151,31 @@ class CiscoL2ParserTest(unittest.TestCase):
 
 
 def host(name, intfs=(), mac_table=(), neighbors=()):
-    """A schema 2 record. intfs: (name, mac, cidr or None)."""
+    """A schema 2 record. intfs: (name, mac, cidr or None[, parent]).
+    Names starting "Po" are port-channels."""
     rec = drivers._empty(name, "ios")
-    for intf_name, mac, cidr in intfs:
+    for intf_name, mac, cidr, *parent in intfs:
         rec["interfaces"].append({
-            "name": intf_name, "kind": "physical", "mac": mac, "admin_up": True,
-            "oper_up": True, "speed_mbps": None, "mtu": None, "description": "",
-            "vrf": "default", "vlan": None, "parent": None,
+            "name": intf_name, "kind": "lag" if intf_name.startswith("Po") else "physical",
+            "mac": mac, "admin_up": True, "oper_up": True, "speed_mbps": None, "mtu": None,
+            "description": "", "vrf": "default", "vlan": None,
+            "parent": parent[0] if parent else None,
             "ipv4": [cidr] if cidr else [], "ipv6": []})
     rec["mac_table"] = [{"mac": m, "intf": i, "vlan": 1} for m, i in mac_table]
     rec["neighbors"] = list(neighbors)
     return rec
+
+
+def nb(local, name, port, proto="lldp"):
+    return {"local_intf": local, "protocol": proto, "remote_name": name,
+            "remote_intf": port, "remote_mac": None, "remote_ip": None,
+            "remote_platform": None, "remote_capabilities": []}
+
+
+def mclag_peer(name, mac_table=(), neighbors=()):
+    """One of a pair of MC-LAG switches: Gi1/0/10 in Po10 faces the bundle."""
+    return host(name, [("Gi1/0/10", None, None, "Po10"), ("Po10", None, None),
+                       ("Gi1/0/48", None, None)], mac_table, neighbors)
 
 
 class EvidenceTest(unittest.TestCase):
@@ -220,14 +234,25 @@ class EvidenceTest(unittest.TestCase):
                          [("Gi1/0/2", ["mac"])])
 
     def test_neighbor_seen_from_both_ends_is_one_link(self):
-        def nb(local, name, port, proto):
-            return {"local_intf": local, "protocol": proto, "remote_name": name,
-                    "remote_intf": port, "remote_mac": None, "remote_ip": None,
-                    "remote_platform": None, "remote_capabilities": []}
         edges, _ = facts_parser.extract_links([
             host("r1", [("Gi1", None, None)], neighbors=[nb("Gi1", "r2.lab", "Gi2", "cdp")]),
             host("r2", [("Gi2", None, None)], neighbors=[nb("Gi2", "r1", "Gi1", "lldp")])])
         self.assertEqual(summary(edges), {("r1", "Gi1", "r2", "Gi2"): (["lldp", "cdp"], 1)})
+
+    def test_ties_on_one_switch_or_on_plain_ports_skipped(self):
+        mac = "00:50:56:00:00:01"
+        # two port-channels on the same switch: not an MC-LAG
+        edges, _ = facts_parser.extract_links([
+            host("sw", [("Po1", None, None), ("Po2", None, None)],
+                 mac_table=[(mac, "Po1"), (mac, "Po2")]),
+            host("a", [("eth0", mac, None)])])
+        self.assertEqual(edges, [])
+        # access ports on two switches: not a bundle either
+        edges, _ = facts_parser.extract_links([
+            host("swA", [("Gi1/0/2", None, None)], mac_table=[(mac, "Gi1/0/2")]),
+            host("swB", [("Gi1/0/2", None, None)], mac_table=[(mac, "Gi1/0/2")]),
+            host("a", [("eth0", mac, None)])])
+        self.assertEqual(edges, [])
 
     def test_old_facts_without_layer_2_data_unchanged(self):
         # the phase 1 lab fixtures have no neighbors or MAC tables
@@ -235,6 +260,59 @@ class EvidenceTest(unittest.TestCase):
         edges, _ = facts_parser.extract_links(nodes)
         self.assertTrue(edges)
         self.assertTrue(all(e["evidence"] == ["subnet"] for e in edges))
+
+
+class McLagTest(unittest.TestCase):
+    """A port-channel whose members end on two switches (vPC, MLAG, VSX)."""
+
+    def test_neighbors_give_one_link_per_peer(self):
+        acc = host("acc", [("Gi1/0/1", None, None, "Po1"), ("Gi1/0/2", None, None, "Po1"),
+                           ("Po1", None, None)],
+                   neighbors=[nb("Gi1/0/1", "swA", "Gi1/0/10"),
+                              nb("Gi1/0/2", "swB", "Gi1/0/10")])
+        edges, _ = facts_parser.extract_links([
+            acc, mclag_peer("swA", neighbors=[nb("Gi1/0/10", "acc", "Gi1/0/1")]),
+            mclag_peer("swB", neighbors=[nb("Gi1/0/10", "acc", "Gi1/0/2")])])
+        self.assertEqual(summary(edges), {("acc", "Po1", "swA", "Po10"): (["lldp"], 1),
+                                          ("acc", "Po1", "swB", "Po10"): (["lldp"], 1)})
+        self.assertEqual([e["mclag"] for e in edges], [["source"], ["source"]])
+
+    def test_ordinary_port_channel_is_not_mclag(self):
+        edges, _ = facts_parser.extract_links(load_l2())
+        self.assertFalse([e for e in edges if "mclag" in e])
+
+    def test_bonded_server_found_by_mac_on_both_peers(self):
+        mac = "00:50:56:00:00:01"
+        edges, _ = facts_parser.extract_links([
+            host("srv", [("bond0", mac, None)]),
+            mclag_peer("swA", mac_table=[(mac, "Gi1/0/10")]),
+            mclag_peer("swB", mac_table=[(mac, "Po10")])])
+        self.assertEqual(summary(edges), {("swA", "Po10", "srv", "bond0"): (["mac"], 1),
+                                          ("swB", "Po10", "srv", "bond0"): (["mac"], 1)})
+        self.assertEqual([e["mclag"] for e in edges], [["target"], ["target"]])
+
+    def test_labelled_on_the_diagram(self):
+        mac = "00:50:56:00:00:01"
+        records = [host("srv", [("bond0", mac, None)]),
+                   mclag_peer("swA", mac_table=[(mac, "Po10")]),
+                   mclag_peer("swB", mac_table=[(mac, "Po10")])]
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            (tmp / "facts").mkdir()
+            for rec in records:
+                (tmp / "facts" / f"{rec['device']['name']}.json").write_text(json.dumps(rec))
+            (tmp / "inventory.yml").write_text(
+                "all:\n  hosts:\n    srv: {}\n    swA: {}\n    swB: {}\n")
+            proc = subprocess.run(
+                [sys.executable, str(support.SCRIPTS / "main.py"), str(tmp / "facts"),
+                 str(tmp), f"--inventory={tmp / 'inventory.yml'}",
+                 f"--template={tmp / 'template.drawio'}"],
+                capture_output=True, text=True, cwd=tmp)
+            self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+            values = [c.get("value") for c in
+                      ET.parse(tmp / "topology.drawio").getroot().iter("mxCell")]
+            self.assertEqual(values.count("bond0 MC-LAG"), 2)
+            self.assertEqual(values.count("Po10"), 2)
 
 
 class VlansLayerTest(unittest.TestCase):
