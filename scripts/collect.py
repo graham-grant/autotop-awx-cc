@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Collects one host's show-command output over SSH and writes the raw-facts
-JSON main.py reads:
-
-    {"inventory_name": ..., "platform": ..., "cli": {command: output}}
+Collects one host's show-command output over SSH and writes its facts
+file: a schema 2 record (see scripts/drivers/__init__.py) with the parsed
+core and facets, the raw output under "raw", and the audit of every line
+sent under "audit".
 
 Run by the playbook on the controller, once per inventory host. Uses
 sshcli.CliSession (system ssh + pty, standard library only): one
@@ -37,7 +37,7 @@ Usage:
                                       checked against the policy, and exit
 
 A command that fails (e.g. not supported on this box) is left out of
-"cli"; failing to log in at all exits non-zero, and so does anything the
+"raw"; failing to log in at all exits non-zero, and so does anything the
 read-only checks stop (exit 3).
 """
 from __future__ import annotations
@@ -47,9 +47,10 @@ import json
 import os
 import shlex
 import sys
+from datetime import datetime, timezone
 
 from commands import commands
-import netparse
+import drivers
 import readonly
 from sshcli import AuthError, CliError, CliSession
 
@@ -71,9 +72,9 @@ def plan(platform: str) -> list[tuple[str, str]]:
     platform, in order, each checked against the read-only policy. Raises
     readonly.CommandRefused if any would be refused, or if the platform has
     no policy - before anything connects."""
-    policy = readonly.policy_for(netparse.platform_key(platform))
-    check = netparse.config_check_command(platform)
-    steps = [("session", c) for c in netparse.paging_commands(platform)]
+    policy = readonly.policy_for(drivers.platform_key(platform))
+    check = drivers.config_check_command(platform)
+    steps = [("session", c) for c in drivers.paging_commands(platform)]
     steps += [("check", check)] if check else []
     steps += [("collect", c) for c in commands(platform)]
     steps += [("check", check)] if check else []
@@ -94,8 +95,9 @@ def _config_marker(session, command):
 
 
 def collect(name, host, platform, port=22, ssh_args=(), timeout=30.0, command_timeout=120.0):
-    policy = readonly.policy_for(netparse.platform_key(platform))
+    policy = readonly.policy_for(drivers.platform_key(platform))
     plan(platform)
+    started = datetime.now(timezone.utc).isoformat(timespec="seconds")
     username = _env(*USERNAME_VARS)
     password = _env(*PASSWORD_VARS)
     if not username or not password:
@@ -104,13 +106,13 @@ def collect(name, host, platform, port=22, ssh_args=(), timeout=30.0, command_ti
                        "NET_USERNAME/NET_PASSWORD")
     print(f"{name}: connecting to {host}:{port} as {username!r}")
     cli = {}
-    check_cmd = netparse.config_check_command(platform)
+    check_cmd = drivers.config_check_command(platform)
     with CliSession(host, username, password, port=port,
                     enable_password=_env(*ENABLE_VARS),
                     ssh_args=list(ssh_args), timeout=timeout,
                     command_timeout=command_timeout, policy=policy,
                     log=lambda line: print(f"{name}: {line}")) as session:
-        session.disable_paging(netparse.paging_commands(platform))
+        session.disable_paging(drivers.paging_commands(platform))
         before = _config_marker(session, check_cmd)
         for cmd in commands(platform):
             try:
@@ -133,9 +135,10 @@ def collect(name, host, platform, port=22, ssh_args=(), timeout=30.0, command_ti
     else:
         config_check = {"status": "unchanged" if before == after else "changed",
                         "command": check_cmd, "before": before, "after": after}
-    return {"inventory_name": name, "platform": platform, "cli": cli,
-            "audit": {"policy": policy.name, "commands": session.audit,
-                      "config_check": config_check}}
+    record = drivers.build_record(name, platform, cli, collected_at=started)
+    record["audit"] = {"policy": policy.name, "commands": session.audit,
+                       "config_check": config_check}
+    return record
 
 
 def _looks_like_error(output: str) -> bool:
@@ -175,7 +178,7 @@ def main(argv=None):
         sys.exit(3)
     with open(a.out, "w", encoding="utf-8") as f:
         json.dump(record, f, indent=2)
-    print(f"{a.name}: collected {len(record['cli'])} command(s): {', '.join(record['cli'])}")
+    print(f"{a.name}: collected {len(record['raw'])} command(s): {', '.join(record['raw'])}")
     check = record["audit"]["config_check"]
     if check["status"] == "changed":
         print(f"{a.name}: CONFIGURATION CHANGED DURING COLLECTION. The marker from "
@@ -192,7 +195,7 @@ def print_plan(platform: str):
         steps = plan(platform)
     except readonly.CommandRefused as e:
         sys.exit(f"read-only plan for {platform!r} REFUSED: {e}")
-    policy = readonly.policy_for(netparse.platform_key(platform))
+    policy = readonly.policy_for(drivers.platform_key(platform))
     print(f"Read-only command plan for platform {platform!r} (policy {policy.name!r}):")
     for kind, cmd in steps:
         print(f"  {kind:<8} {cmd}")

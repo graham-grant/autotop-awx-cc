@@ -41,7 +41,7 @@ class EndToEndTest(unittest.TestCase):
     def test_no_third_party_imports(self):
         """Every import under scripts/ resolves to the stdlib or the project."""
         import ast
-        local = {p.stem for p in support.SCRIPTS.glob("*.py")} | {"features", "netparse", "_hanan"}
+        local = {p.stem for p in support.SCRIPTS.glob("*.py")} | {"features", "drivers", "_hanan"}
         stdlib = set(sys.stdlib_module_names)
         for path in support.SCRIPTS.rglob("*.py"):
             tree = ast.parse(path.read_text())

@@ -17,8 +17,16 @@ a device is only for gathering information.
 - A new platform needs its read-only policy, its config-change marker if it
   has one, and entries in `tests/test_readonly.py`, before it can be
   contacted.
-- A new feature's `commands` must pass the policy for each platform it lists.
-  `tests/test_readonly.py` checks this.
+- Every command a driver lists (core, paging, config check and facet
+  commands) must pass that platform's policy. `tests/test_readonly.py`
+  checks this.
+
+## Vendor knowledge stays in drivers
+
+Only `scripts/drivers/` reads vendor output. Features read their facet and
+the schema 2 core, never raw output. A change to the facts format that
+breaks existing files bumps `drivers.SCHEMA`, and `drivers.load()` upgrades
+older files.
 
 ## Standard library only
 

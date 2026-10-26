@@ -9,8 +9,8 @@ this package exposing a module-level `FEATURE = SomeFeature()`.
 Each feature goes through three steps, each with a narrow contract so
 features can be added one at a time without touching each other:
 
-  collect(topo)        -> data   parse this feature's facts out of the host
-                                 JSON (topo.cli(host, cmd) / topo.hosts)
+  collect(topo)        -> data   read this feature's facet (topo.facet(host,
+                                 self.facet)) and the core (topo.hosts)
   plan(data, topo)     -> plan   geometry: where things go, relative to the
                                  already-routed physical diagram
   render(plan, layer)            emit cells into this feature's own
@@ -24,8 +24,10 @@ Isolation guarantees, enforced by run_features():
   else is affected;
 - cell ids are namespaced by feature name, so two features can't collide.
 
-A feature also declares which CLI commands it needs per platform
-(`commands`), which the playbook gathers alongside the core ones - see
+A feature never reads vendor output. It declares the facet it draws
+(`facet = "ipsec"`), each platform driver (scripts/drivers/) says which
+commands supply that facet and parses them into one vendor-neutral shape,
+and collection gathers those commands for every enabled feature - see
 scripts/commands.py. Enable/disable features with config.ENABLED_FEATURES,
 and override a feature's SETTINGS via config.FEATURE_SETTINGS[name].
 """
@@ -43,7 +45,7 @@ import config
 class Feature:
     name: str = ""              # unique id: facts key, cell-id prefix, settings key
     label: str = ""             # draw.io layer name
-    commands: dict[str, list[str]] = {}  # platform -> show commands to gather
+    facet: str | None = None    # the facets[...] key this feature draws
     SETTINGS: dict = {}         # defaults, overridable via config.FEATURE_SETTINGS
 
     def __init__(self):
@@ -140,13 +142,13 @@ def enabled() -> list[Feature]:
     return [available[n] for n in wanted if n in available]
 
 
-def commands_for(platform: str) -> list[str]:
-    cmds = []
+def facets_enabled() -> list[str]:
+    """The facets drawn by the enabled features, in feature order."""
+    facets = []
     for feature in enabled():
-        for cmd in feature.commands.get(platform, []):
-            if cmd not in cmds:
-                cmds.append(cmd)
-    return cmds
+        if feature.facet and feature.facet not in facets:
+            facets.append(feature.facet)
+    return facets
 
 
 def run_features(root: ET.Element, topo, features=None) -> dict[str, str]:

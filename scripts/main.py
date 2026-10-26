@@ -9,15 +9,16 @@ emit draw.io XML with IP/interface labels and status dots (renderer.py),
 then let each enabled protocol feature (features/ - e.g. IPsec tunnels)
 draw itself onto its own layer. Tunable settings live in config.py.
 
-Runs on a base Python 3 install: no third-party packages. Host JSON is raw
-show-command output normalized by netparse/, inventory.yml is read by
+Runs on a base Python 3 install: no third-party packages. Host JSON is a
+schema 2 record per device (drivers/; older files are upgraded on load,
+and --reparse re-parses each file's raw output), inventory.yml is read by
 miniyaml.py, and the A* router's search runs in a C extension that ships
 prebuilt (_hanan.abi3.so, CPython 3.9+ stable ABI) - no compiler needed.
 
 Links are derived from directly-connected subnets: every interface IP
 the device reports is grouped by network, and any subnet shared by exactly two
 inventory hosts becomes a link between them. A subnet shared by three or
-more hosts is drawn as a full mesh, with a note printed.
+more hosts becomes a small segment node linked to each of them.
 
 Node positions are no longer kept in a YAML config - they're read straight
 out of template.drawio (drawio_position_loader.py), a stripped-down
@@ -25,7 +26,7 @@ companion file containing just one rectangle per inventory host, no links
 or labels. Reposition nodes by opening that file, dragging them around,
 and saving - the next run picks the new positions straight up. A node can
 also get a preferred attachment side (top/bottom/left/right), overriding
-the automatic per-node majority-vote choice, by adding a custom "side"
+the automatic per-link choice, by adding a custom "side"
 property to it in draw.io (right-click -> Edit Style, or the Edit Data
 panel) - this round-trips the same way positions do.
 
@@ -38,7 +39,8 @@ somewhere reasonable, not laid out well, since you're expected to
 reposition it by hand once.
 
 Usage:
-    python3 main.py [facts_dir] [output_dir] [--inventory PATH] [--template PATH] [--icon-library PATH]
+    python3 main.py [facts_dir] [output_dir] [--inventory=PATH] [--template=PATH]
+                    [--icon-library=PATH] [--reparse]
 
 Defaults: facts_dir=output/facts, output_dir=output,
 inventory=<project root>/inventory.yml, template=<project root>/template.drawio,
@@ -94,6 +96,29 @@ def _place_unpinned_nodes(pinned, unpinned_names):
     return positions
 
 
+def _place_segments(segments, centers, sizes):
+    """Put each unpinned segment node between its members (the centroid of
+    their centres), nudged down until it overlaps no other node."""
+    placed = {}
+    for seg in segments:
+        sid = seg["id"]
+        if sid in centers:
+            continue
+        xs = [centers[m][0] for m in seg["members"]]
+        ys = [centers[m][1] for m in seg["members"]]
+        cx, cy = sum(xs) / len(xs), sum(ys) / len(ys)
+        w, h = sizes[sid]
+        for _ in range(50):
+            clash = any(abs(cx - ox) < (w + sizes[o][0]) / 2 + 10 and
+                        abs(cy - oy) < (h + sizes[o][1]) / 2 + 10
+                        for o, (ox, oy) in {**centers, **placed}.items())
+            if not clash:
+                break
+            cy += h + 20
+        placed[sid] = (cx, cy)
+    return placed
+
+
 def _load_node_sizes(inventory_path, node_names):
     """Host-specific 'w' and 'h' dimensions from inventory.yml (group vars
     inherited). Falls back to config defaults if not set, or for every
@@ -118,22 +143,25 @@ def _load_node_sizes(inventory_path, node_names):
 
 def main():
     argv = sys.argv[1:]
-    positional = [a for a in argv if "=" not in a]
+    positional = [a for a in argv if not a.startswith("--")]
     facts_dir = positional[0] if len(positional) > 0 else config.DEFAULT_FACTS_DIR
     out_dir = positional[1] if len(positional) > 1 else config.DEFAULT_OUTPUT_DIR
     inventory_path = _parse_path_arg(argv, "--inventory", config.DEFAULT_INVENTORY_PATH)
     template_path = _parse_path_arg(argv, "--template", config.DEFAULT_TEMPLATE_PATH)
     icon_library_path = _parse_path_arg(argv, "--icon-library", config.DEFAULT_ICON_LIBRARY_PATH)
 
-    nodes = parser.load_nodes(facts_dir)
+    nodes = parser.load_nodes(facts_dir, reparse="--reparse" in argv)
     if not nodes:
         sys.exit(f"No fact files found in {facts_dir} - run the playbook first.")
 
-    edges = parser.extract_edges(nodes)
+    edges, segments = parser.extract_links(nodes)
     edges_by_id = {e["id"]: e for e in edges}
-    node_names = [n["inventory_name"] for n in nodes]
+    node_names = [n["device"]["name"] for n in nodes]
+    segment_ids = [s["id"] for s in segments]
 
     pinned = dpl.load_pinned_positions_from_drawio(template_path, inventory_path)
+    pinned = {k: v for k, v in pinned.items()  # drop segments that no longer exist
+              if not k.startswith(parser.SEGMENT_PREFIX) or k in segment_ids}
 
     unpinned = [name for name in node_names if name not in pinned]
     new_positions = _place_unpinned_nodes(pinned, unpinned) if unpinned else {}
@@ -142,32 +170,36 @@ def main():
               f"placed in a staging grid: {', '.join(unpinned)}")
 
     centers = {}
-    for name in node_names:
+    for name in node_names + segment_ids:
         if name in pinned:
             centers[name] = (pinned[name]["x"], pinned[name]["y"])
-        else:
+        elif name in new_positions:
             centers[name] = new_positions[name]
 
     # Dynamically evaluate sizes from inventory.yml before falling back to defaults
     sizes = _load_node_sizes(inventory_path, node_names)
+    sizes.update({sid: (config.SEGMENT_NODE_W, config.SEGMENT_NODE_H) for sid in segment_ids})
+    centers.update(_place_segments(segments, centers, sizes))
     preferred_sides = {name: p["side"] for name, p in pinned.items() if "side" in p}
 
     hanan_nodes, specs = pathfinder.build_link_specs(edges, centers, sizes, preferred_sides)
 
     icons_by_id = parser.load_icons(inventory_path)
     icon_lib = icon_library.load_icon_library(icon_library_path)
-    mxfile = renderer.render_tree(hanan_nodes, specs, edges_by_id, icons_by_id, icon_lib)
+    mxfile = renderer.render_tree(hanan_nodes, specs, edges_by_id, icons_by_id, icon_lib,
+                                  segments)
 
     # Protocol features (features/), each on its own draw.io layer above the
     # physical diagram. A feature that fails is reported and left out.
-    topo = Topology(nodes, edges, hanan_nodes, specs)
+    topo = Topology(nodes, edges, hanan_nodes, specs, segments)
     feature_results = features.run_features(mxfile.find(".//root"), topo)
     xml_str = ET.tostring(mxfile, encoding="unicode")
 
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     out_path = Path(out_dir) / "topology.drawio"
     out_path.write_text(xml_str)
-    print(f"\nWrote {len(nodes)} nodes and {len(edges)} links to {out_path}")
+    seg_note = f" and {len(segments)} shared segment(s)" if segments else ""
+    print(f"\nWrote {len(nodes)} nodes{seg_note} and {len(edges)} links to {out_path}")
     for name, status in feature_results.items():
         print(f"  feature {name}: {status}")
 

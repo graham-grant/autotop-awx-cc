@@ -15,7 +15,7 @@ import support
 import audit
 import collect
 import features
-import netparse
+import drivers
 import readonly
 from sshcli import CliError, CliSession
 
@@ -90,33 +90,34 @@ class CommandInventoryTest(unittest.TestCase):
     pass its platform's policy. Adding a command that doesn't fails here."""
 
     def test_every_driver_has_a_policy(self):
-        for platform in netparse._DRIVERS:
+        for platform in drivers.platforms():
             with self.subTest(platform=platform):
                 readonly.policy_for(platform)
 
     def test_every_driver_command_is_read_only(self):
-        for platform in netparse._DRIVERS:
+        for platform in drivers.platforms():
             policy = readonly.policy_for(platform)
-            cmds = (netparse.paging_commands(platform) + netparse.core_commands(platform)
-                    + [netparse.config_check_command(platform)])
+            cmds = (drivers.paging_commands(platform) + drivers.core_commands(platform)
+                    + [drivers.config_check_command(platform)]
+                    + drivers.facet_commands(platform))  # every facet, enabled or not
             for cmd in filter(None, cmds):
                 with self.subTest(platform=platform, cmd=cmd):
                     policy.check(cmd)
 
-    def test_every_feature_command_is_read_only(self):
+    def test_every_feature_facet_command_is_read_only(self):
         for name, feature in features.discover().items():
-            for platform, cmds in feature.commands.items():
+            for platform in drivers.platforms():
                 policy = readonly.policy_for(platform)
-                for cmd in cmds:
+                for cmd in drivers.facet_commands(platform, [feature.facet]):
                     with self.subTest(feature=name, platform=platform, cmd=cmd):
                         policy.check(cmd)
 
     def test_default_paging_commands_are_read_only(self):
-        for cmd in netparse._DEFAULT_PAGING:
+        for cmd in drivers._DEFAULT_PAGING:
             readonly.policy_for("ios").check(cmd)
 
     def test_plan_for_every_platform(self):
-        for platform in netparse._DRIVERS:
+        for platform in drivers.platforms():
             steps = collect.plan(platform)
             self.assertTrue(steps)
 

@@ -12,6 +12,7 @@ Ctrl-C."""
 import os
 import sys
 import termios
+import time
 import tty
 
 MODE = os.environ.get("FAKE_SSH_MODE", "inband")
@@ -76,6 +77,8 @@ while True:
                 out(PAGER)
                 sys.stdin.read(1)
                 out("\r" + " " * len(PAGER) + "\r")
+                if os.environ.get("FAKE_SSH_SLOW_ERASE"):
+                    time.sleep(0.3)  # the erase arrives on its own, as on a slow link
     elif cmd == "show running-config | include configuration change":
         config_reads += 1
         minute = 10 + (config_reads if MODE == "configchange" else 0)

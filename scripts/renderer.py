@@ -25,7 +25,7 @@ from config import (
     STATUS_UP_COLOR, STATUS_DOWN_COLOR, STATUS_DOT_SIZE,
     IP_LABEL_FRACTION, IP_LABEL_STYLE,
     INTF_LABEL_FRACTION, INTF_LABEL_STYLE, INTF_ABBREVIATIONS,
-    BLANK_LABEL,
+    BLANK_LABEL, SEGMENT_NODE_STYLE,
 )
 from pathfinder import Node, LinkSpec, Point
 from icon_library import IconEntry
@@ -148,13 +148,13 @@ def _add_edge_label(root, edge_id, text, x_fraction, suffix, style):
     })
 
 
-def render(nodes, specs, edges_by_id, icons_by_id=None, icon_library=None):
+def render(nodes, specs, edges_by_id, icons_by_id=None, icon_library=None, segments=()):
     """render_tree(), serialized to a string."""
-    return ET.tostring(render_tree(nodes, specs, edges_by_id, icons_by_id, icon_library),
-                       encoding="unicode")
+    return ET.tostring(render_tree(nodes, specs, edges_by_id, icons_by_id, icon_library,
+                                   segments), encoding="unicode")
 
 
-def render_tree(nodes, specs, edges_by_id, icons_by_id=None, icon_library=None):
+def render_tree(nodes, specs, edges_by_id, icons_by_id=None, icon_library=None, segments=()):
     """Build the base XML via build_drawio_xml(), then add this project's
     IP/interface labels. Interface backgrounds change color based on link status.
     edges_by_id maps each LinkSpec's id to this project's edge dict.
@@ -163,10 +163,19 @@ def render_tree(nodes, specs, edges_by_id, icons_by_id=None, icon_library=None):
     (see icon_library.load_icon_library) - if both are given and a node's
     id has a matching entry, that node's cell gets the icon style instead
     of the default rounded rectangle.
+
+    segments (from parser.extract_links) get the shared-segment style, with
+    the segment's label (network, VRF, VLAN) instead of its id.
     """
     xml_str = build_drawio_xml(nodes, specs)
     mxfile = ET.fromstring(xml_str)
     root = mxfile.find(".//root")
+
+    seg_labels = {s["id"]: s["label"] for s in segments}
+    for cell in root.findall("mxCell"):
+        if cell.get("vertex") == "1" and cell.get("id") in seg_labels:
+            cell.set("style", SEGMENT_NODE_STYLE)
+            cell.set("value", seg_labels[cell.get("id")])
 
     if icons_by_id and icon_library:
         node_ids = {n.id for n in nodes}
@@ -217,7 +226,8 @@ def render_tree(nodes, specs, edges_by_id, icons_by_id=None, icon_library=None):
         # Position at exactly -1.0 (source) and 1.0 (target) to pin directly against nodes
         _add_edge_label(root, s.id, abbreviate_intf(edge["source_intf"]),
                          -1.0, "intf-src", src_style)
-        _add_edge_label(root, s.id, abbreviate_intf(edge["target_intf"]),
-                         1.0, "intf-tgt", dst_style)
+        if edge["target_intf"]:  # links to a segment node have no far interface
+            _add_edge_label(root, s.id, abbreviate_intf(edge["target_intf"]),
+                             1.0, "intf-tgt", dst_style)
 
     return mxfile

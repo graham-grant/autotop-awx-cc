@@ -252,6 +252,7 @@ class CliSession:
         self._send(command)
         deadline = time.monotonic() + (timeout or self.command_timeout)
         buf = b""
+        answered = 0  # len(buf) when we last answered a pager
         while True:
             if time.monotonic() > deadline:
                 entry["status"] = "timeout"
@@ -262,8 +263,12 @@ class CliSession:
                 continue
             buf += data
             tail = _ANSI.sub(b"", buf[-200:])
-            if _MORE_WAITING.search(tail):
+            # Only look for a pager in what arrived since we last answered
+            # one: the pager's own erase ("\r    \r") can arrive on its own,
+            # and the erased prompt must not get a second space.
+            if _MORE_WAITING.search(_ANSI.sub(b"", buf[max(answered, len(buf) - 200):])):
                 os.write(self.fd, b" ")
+                answered = len(buf)
                 continue
             if prompt_re.search(tail.rstrip(b" ")):
                 break

@@ -2,16 +2,16 @@
 # Gathers raw show-command output from every host in the `network_devices`
 # group over SSH (scripts/collect.py - stdlib Python + the system ssh
 # client; no NAPALM, no network collections, nothing to pip install), then
-# writes one JSON file per host
-# to output/facts/. scripts/main.py parses that output (scripts/netparse/)
-# into the NAPALM-style schema the rest of the project uses and draws the
-# drawio diagram. Adjacency is derived from directly-connected subnets (two
+# writes one JSON file per host to output/facts/: the common device format
+# (schema 2), parsed by the platform's driver (scripts/drivers/), with the
+# raw output kept. scripts/main.py reads those files and draws the drawio
+# diagram. Adjacency is derived from directly-connected subnets (two
 # hosts with an IP in the same subnet are linked), not LLDP - see
 # scripts/parser.py for why.
 #
 # Which commands get run is decided by scripts/commands.py: the core
-# commands netparse needs for the host's platform, plus whatever each
-# enabled feature plugin (scripts/features/) asks for. Adding a feature
+# commands the platform's driver needs, plus the commands behind each facet
+# an enabled feature plugin (scripts/features/) draws. Adding a feature
 # never needs an edit here.
 #
 # Read-only: collection never changes a device. Play 1 prints the exact
