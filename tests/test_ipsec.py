@@ -31,9 +31,10 @@ class CryptoSessionParserTest(unittest.TestCase):
         tunnels = parse_ios_crypto_session(text)
         self.assertEqual([t["interface"] for t in tunnels], ["Tunnel1", "Tunnel2", "Tunnel3"])
         self.assertEqual(tunnels[0], {"interface": "Tunnel1", "local_address": "172.16.0.1",
-                                      "peer_address": "172.16.0.11", "status": "UP-ACTIVE"})
+                                      "peer_address": "172.16.0.11", "status": "up",
+                                      "vendor_status": "UP-ACTIVE"})
         # DOWN session has no IKE SA: local address comes from the flow line
-        self.assertEqual(tunnels[2]["status"], "DOWN")
+        self.assertEqual((tunnels[2]["status"], tunnels[2]["vendor_status"]), ("down", "DOWN"))
         self.assertEqual(tunnels[2]["local_address"], "172.16.0.1")
 
     def test_empty_output(self):
@@ -81,8 +82,62 @@ class IpsecCollectTest(unittest.TestCase):
             host["facets"].pop("ipsec", None)
         topo.hosts["hq"]["facets"]["ipsec"] = {"tunnels": [{
             "interface": "Tunnel9", "local_address": "172.16.0.1",
-            "peer_address": "203.0.113.9", "status": "UP-ACTIVE"}]}
+            "peer_address": "203.0.113.9", "status": "up"}]}
         self.assertEqual(IPSEC.collect(topo), [])
+
+
+class MixedVendorTest(unittest.TestCase):
+    """A tunnel between a Cisco router and a Palo Alto firewall. The feature
+    only sees the ipsec facet, so the far end's vendor mustn't matter. The
+    Palo Alto record is written the way the PAN-OS driver (phase 3) will
+    write it: its own interface naming, its own status word kept in
+    vendor_status, and status normalised to up/down/unknown."""
+
+    def setUp(self):
+        self.topo = fixture_topology()
+        fw = self.topo.hosts["branch1"]
+        fw["device"].update(vendor="paloalto", platform="panos", role="firewall")
+        fw["facets"]["ipsec"] = {"tunnels": [{
+            "interface": "tunnel.1", "local_address": "172.16.0.11",
+            "peer_address": "172.16.0.1", "status": "up", "vendor_status": "active"}]}
+
+    def tunnel(self):
+        (t,) = [t for t in IPSEC.collect(self.topo) if {t.a, t.b} == {"hq", "branch1"}]
+        return t
+
+    def test_both_ends_merge_into_one_up_tunnel(self):
+        t = self.tunnel()
+        self.assertTrue(t.is_up)
+        intf = {t.a: t.a_intf, t.b: t.b_intf}
+        self.assertEqual(intf, {"hq": "Tunnel1", "branch1": "tunnel.1"})
+        self.assertEqual(len(IPSEC.collect(self.topo)), 3)  # no duplicate
+
+    def test_down_on_either_end_draws_it_down(self):
+        self.topo.hosts["branch1"]["facets"]["ipsec"]["tunnels"][0].update(
+            status="down", vendor_status="init")
+        self.assertFalse(self.tunnel().is_up)
+
+    def test_missing_local_address_still_merges(self):
+        # some platforms only report the peer; the far end's report fills it in
+        for rec in self.topo.hosts["hq"]["facets"]["ipsec"]["tunnels"]:
+            rec["local_address"] = None
+        tunnels = IPSEC.collect(self.topo)
+        self.assertEqual(len(tunnels), 3)
+        t = self.tunnel()
+        addr = {t.a: t.a_addr, t.b: t.b_addr}
+        self.assertEqual(addr, {"hq": "172.16.0.1", "branch1": "172.16.0.11"})
+
+    def test_drawn_between_the_two_nodes(self):
+        layer = Layer(IPSEC)
+        IPSEC.render(IPSEC.plan(IPSEC.collect(self.topo), self.topo), layer)
+        ends = {frozenset((c.find("mxCell").get("source"), c.find("mxCell").get("target")))
+                for c in layer.cells}
+        self.assertIn(frozenset(("hq", "branch1")), ends)
+
+    def test_cisco_driver_normalises_status(self):
+        hq = self.topo.hosts["hq"]["facets"]["ipsec"]["tunnels"]
+        self.assertEqual([(t["status"], t["vendor_status"]) for t in hq],
+                         [("up", "UP-ACTIVE"), ("up", "UP-ACTIVE"), ("down", "DOWN")])
 
 
 class IpsecGeometryTest(unittest.TestCase):

@@ -185,7 +185,8 @@ by the feature that draws it. **raw** keeps exactly what was collected.
                  "ipv4": ["10.0.12.1/30"], "ipv6": []}],
  "neighbors": [], "arp": [], "mac_table": [],
  "facets": {"ipsec": {"tunnels": [{"interface": "Tunnel10", "local_address": "172.16.0.1",
-                                   "peer_address": "172.16.0.11", "status": "UP-ACTIVE"}]}},
+                                   "peer_address": "172.16.0.11", "status": "up",
+                                   "vendor_status": "UP-ACTIVE"}]}},
  "raw": {"show version": "...", "show interfaces": "...", "...": "..."},
  "audit": {"policy": "ios",
            "commands": [{"time": "2026-10-26T01:00:03+00:00", "command": "show version",
@@ -431,15 +432,18 @@ path.
 How it works:
 
 1. **Read the sessions.** Each device's `ipsec` facet lists its sessions:
-   tunnel interface, local address, peer address and status. On IOS the
-   driver takes the local address from the IKE SA line, or from the IPsec
-   flow if IKE is down.
+   tunnel interface, local address, peer address, and a status the driver
+   normalises to `up`, `down` or `unknown` (the device's own word, such as
+   IOS `UP-ACTIVE`, is kept as `vendor_status`). On IOS the driver takes
+   the local address from the IKE SA line, or from the IPsec flow if IKE is
+   down.
 2. **Find both ends.** Each peer address is looked up among every interface
    address on every device, loopbacks included. The device that owns it is
    the far end. A peer that isn't in the inventory is skipped.
 3. **Merge.** Both ends usually report the same tunnel, so the two reports
-   are merged into one tunnel. It's drawn as down if either end doesn't
-   report it as up.
+   are merged into one tunnel. An end that doesn't report its own local
+   address takes it from the far end's report, so the two still merge. It's
+   drawn as down if either end doesn't report it as up.
 4. **Find the path.** The routers in between are found with a fewest-hops
    search over the physical links, preferring links that are up. This is the
    likely underlay path, not necessarily the one the routing table uses.
@@ -451,6 +455,14 @@ How it works:
    - Over a transit router, each tunnel keeps its lane, so they pass over in
      parallel.
 
+Nothing in these steps depends on either end's vendor, so a tunnel from a
+Cisco router to a Palo Alto firewall is merged and drawn like any other, as
+long as each driver fills in the facet as described. `tests/test_ipsec.py`
+checks this with a Cisco end and a Palo Alto end written the way the PAN-OS
+driver will write it. One limit: if an end is behind NAT, its peer sees the
+translated address, which no inventory device owns, so only the other
+end's report can place the tunnel.
+
 Settings (`config.FEATURE_SETTINGS["ipsec"]`): `up_color`, `down_color`,
 `style`, `lane_spacing`, `converge_near`, `converge_far`, `transit_spacing`.
 
@@ -460,7 +472,7 @@ into a device's facet:
 
 ```json
 "facets": {"ipsec": {"tunnels": [{"interface": "Tunnel10", "local_address": "203.0.113.1",
-                       "peer_address": "198.51.100.7", "status": "UP-ACTIVE",
+                       "peer_address": "198.51.100.7", "status": "up",
                        "path": ["branch1", "isp-rtr", "hq"]}]}}
 ```
 

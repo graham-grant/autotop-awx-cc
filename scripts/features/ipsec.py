@@ -6,11 +6,22 @@ it fills in the same shape (the Cisco driver from `show crypto session
 detail`; see scripts/drivers/):
 
     "facets": {"ipsec": {"tunnels": [{"interface": "Tunnel10", "local_address": "...",
-                                      "peer_address": "...", "status": "UP-ACTIVE",
+                                      "peer_address": "...", "status": "up",
+                                      "vendor_status": "UP-ACTIVE",
                                       "path": ["optional", "explicit", "hops"]}]}}
 
-Each tunnel's peer address is matched to whichever inventory host owns it;
-both ends' reports are merged into one tunnel. The underlay path is the
+  interface       the device's own name for the tunnel (shown in the tooltip)
+  local_address   this end's tunnel source address, or null if not reported
+  peer_address    the far end's address (required)
+  status          "up", "down" or "unknown", normalised by the driver
+  vendor_status   the device's own status word, for the tooltip (optional)
+  path            explicit underlay hops (optional)
+
+Nothing here depends on the vendor at either end, so a tunnel from a Cisco
+router to a Palo Alto firewall is drawn like any other. Each tunnel's peer
+address is matched to whichever inventory host owns it; both ends' reports
+are merged into one tunnel. An end that doesn't report its local address
+takes it from the far end's report. The underlay path is the
 explicit "path" if given, otherwise the fewest-hops path over the physical
 links - the tunnel is drawn across every router on it. Tunnels terminating
 on the same router converge into parallel lanes (see bundling.py).
@@ -40,6 +51,12 @@ class Tunnel:
 # Feature
 # ---------------------------------------------------------------------------
 
+def _is_up(status) -> bool:
+    """Facet status "up". Older pre-normalised data used the device's own
+    word, so anything starting "up" (UP-ACTIVE, ...) counts too."""
+    return str(status or "").lower().startswith("up")
+
+
 class IpsecFeature(Feature):
     name = "ipsec"
     label = "IPsec tunnels"
@@ -59,7 +76,7 @@ class IpsecFeature(Feature):
         return (topo.facet(host, self.facet) or {}).get("tunnels") or []
 
     def collect(self, topo) -> list[Tunnel]:
-        merged: dict[tuple, dict] = {}
+        reports = []  # (host, peer_host, record)
         for host in sorted(topo.hosts):
             for rec in self.host_tunnels(topo, host):
                 peer = topo.owner_of_ip(rec["peer_address"])
@@ -67,18 +84,29 @@ class IpsecFeature(Feature):
                     print(f"ipsec: {host} {rec.get('interface')}: peer {rec['peer_address']} "
                           f"isn't an inventory host - not drawn")
                     continue
-                peer_host = peer[0]
-                if peer_host == host:
-                    continue
-                local = rec.get("local_address") or "?"
-                key = tuple(sorted([(host, local), (peer_host, rec["peer_address"])]))
-                up = str(rec.get("status", "")).upper().startswith("UP")
-                entry = merged.setdefault(key, {"intf": {}, "up": [], "path": None})
-                entry["intf"][host] = rec.get("interface")
-                entry["up"].append(up)
-                if rec.get("path") and entry["path"] is None:
-                    path = list(rec["path"])
-                    entry["path"] = path if path[0] == key[0][0] else path[::-1]
+                if peer[0] != host:
+                    reports.append((host, peer[0], rec))
+
+        # What each host's tunnel peers say its address is, for ends that
+        # don't report their own local address
+        seen_as: dict[tuple, set] = {}
+        for host, peer_host, rec in reports:
+            seen_as.setdefault((peer_host, host), set()).add(rec["peer_address"])
+
+        merged: dict[tuple, dict] = {}
+        for host, peer_host, rec in reports:
+            local = rec.get("local_address")
+            if not local:
+                guesses = seen_as.get((host, peer_host), set())
+                local = next(iter(guesses)) if len(guesses) == 1 else "?"
+            key = tuple(sorted([(host, local), (peer_host, rec["peer_address"])]))
+            up = _is_up(rec.get("status"))
+            entry = merged.setdefault(key, {"intf": {}, "up": [], "path": None})
+            entry["intf"][host] = rec.get("interface")
+            entry["up"].append(up)
+            if rec.get("path") and entry["path"] is None:
+                path = list(rec["path"])
+                entry["path"] = path if path[0] == key[0][0] else path[::-1]
 
         tunnels = []
         for (a_end, b_end), info in sorted(merged.items()):

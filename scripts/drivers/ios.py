@@ -142,6 +142,10 @@ def parse_crypto_session(text: str) -> list[dict]:
     is up) an "IKEv1/IKEv2 SA: local A/500 remote B/500" line giving the
     local address. A session with no IKE SA falls back to the IPSEC FLOW
     host pair, and failing that leaves local_address unset.
+
+    "status" is the facet's normalised up/down/unknown; IOS's own word
+    (UP-ACTIVE, UP-IDLE, UP-NO-IKE, DOWN-NEGOTIATING, ...) is kept in
+    "vendor_status".
     """
     tunnels = []
     current = None
@@ -155,11 +159,14 @@ def parse_crypto_session(text: str) -> list[dict]:
         if s.startswith("Interface:"):
             flush()
             current = {"interface": s.split(":", 1)[1].strip(), "local_address": None,
-                       "peer_address": None, "status": "UNKNOWN"}
+                       "peer_address": None, "status": "unknown", "vendor_status": None}
         elif current is None:
             continue
         elif s.startswith("Session status:"):
-            current["status"] = s.split(":", 1)[1].strip()
+            word = s.split(":", 1)[1].strip()
+            current["vendor_status"] = word
+            current["status"] = ("up" if word.upper().startswith("UP") else
+                                 "down" if word.upper().startswith("DOWN") else "unknown")
         elif s.startswith("Peer:") and current["peer_address"] is None:
             current["peer_address"] = s.split()[1]
         elif (m := _SA_RE.search(s)) and current["local_address"] is None:

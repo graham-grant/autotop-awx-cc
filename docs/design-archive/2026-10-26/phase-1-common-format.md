@@ -39,6 +39,13 @@ The implemented rule:
 
 **Role.** The IOS driver sets `role` to `switch` for Catalyst models (WS-C, C9200 to C9600, C1000, C2960, C3650/3850, IE-) and to `router` otherwise. It isn't used for drawing yet. Icons still come from the inventory.
 
+**The IPsec facet is fully vendor-neutral.** Before merging, the project owner asked for assurance that a tunnel between a Cisco router and a Palo Alto firewall would draw correctly. Checking this found two places where the facet still leaned on Cisco behaviour. Both are fixed in this phase:
+
+- *Status.* The feature treated any status starting with "UP" as up, which is IOS's vocabulary (PAN-OS says `active`). The facet now carries a normalised `status` of `up`, `down` or `unknown`, set by the driver. The device's own word goes in `vendor_status`.
+- *Missing local address.* If one end didn't report its local address, the two ends' reports didn't merge, and the tunnel was drawn twice. An end with no local address now takes it from the far end's report.
+
+`tests/test_ipsec.py` has a mixed-vendor case, written the way the PAN-OS driver will fill the facet. It checks that the two ends merge into one tunnel with the right status, interfaces and addresses, and that it is drawn between the two nodes.
+
 **Parser failures don't lose data.** If a driver raises, the file is still written with the raw output and a `parse_error`. The device is drawn with no links, and `--reparse` can repair it once the parser is fixed.
 
 ## Unchanged

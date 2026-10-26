@@ -24,6 +24,15 @@ class CliSessionTest(unittest.TestCase):
             self.assertEqual(out.splitlines(), [f"g{i}  1G-Copper  Full  1000  Up" for i in range(1, 13)])
             self.assertEqual(s.run("show version"), "SW version    3.0.0.44\n")
 
+    def test_pager_answered_once_when_its_erase_arrives_alone(self):
+        """The pager erases itself with "\r    \r"; if that arrives in a
+        read of its own, the erased prompt mustn't be answered again (the
+        extra space would be typed in front of the next command)."""
+        env = {"FAKE_SSH_MODE": "inband", "FAKE_SSH_SLOW_ERASE": "1"}
+        with mock.patch.dict(os.environ, env), session() as s:
+            self.assertEqual(len(s.run("show interfaces status").splitlines()), 12)
+            self.assertEqual(s.run("show version"), "SW version    3.0.0.44\n")
+
     def test_paging_disabled(self):
         with mock.patch.dict(os.environ, {"FAKE_SSH_MODE": "inband"}), session() as s:
             s.disable_paging(["terminal length 0", "terminal datadump"])
