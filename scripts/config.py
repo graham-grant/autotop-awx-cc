@@ -83,6 +83,17 @@ INTF_ABBREVIATIONS = [
     ("Vlan", "Vl"), ("Tunnel", "Tu"),
 ]
 
+# ---------------------------------------------------------------------------
+# Shared segments: a subnet with three or more inventory members is drawn as
+# a small node of its own, linked to each member, instead of a full mesh.
+# Its position can be pinned in template.drawio like any node (its label
+# there starts with "segment "); otherwise it's placed between its members.
+# ---------------------------------------------------------------------------
+SEGMENT_NODE_W = 160
+SEGMENT_NODE_H = 30
+SEGMENT_NODE_STYLE = ("rounded=1;arcSize=50;whiteSpace=wrap;html=1;fontSize=10;"
+                      "fillColor=#f5f5f5;strokeColor=#666666;fontColor=#333333;")
+
 # Zero-width space: a plain "" or " " label on a drawio vertex falls back to
 # showing the cell's id instead of staying blank. U+200B isn't treated as
 # whitespace, so it survives and renders as an effectively invisible label.

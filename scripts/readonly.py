@@ -138,7 +138,7 @@ _POLICIES = {
 
 
 def policy_for(platform: str) -> Policy:
-    """The read-only policy for a netparse platform key ("ios"). Raises
+    """The read-only policy for a driver platform key ("ios"). Raises
     CommandRefused if the platform has none, so an unknown platform is
     never contacted."""
     policy = _POLICIES.get((platform or "").lower())

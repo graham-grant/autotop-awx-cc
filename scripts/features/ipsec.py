@@ -1,13 +1,13 @@
 """
 IPsec tunnels, drawn as curved dashed lines on their own layer.
 
-Facts: each host's `show crypto session detail` output (gathered by the
-playbook - see `commands` below), or, for hosts whose data comes from some
-other collector, a pre-normalised list under the host JSON's "ipsec" key:
+Facts: the "ipsec" facet of each host, which every driver that can supply
+it fills in the same shape (the Cisco driver from `show crypto session
+detail`; see scripts/drivers/):
 
-    "ipsec": {"tunnels": [{"interface": "Tunnel10", "local_address": "...",
-                           "peer_address": "...", "status": "UP-ACTIVE",
-                           "path": ["optional", "explicit", "hops"]}]}
+    "facets": {"ipsec": {"tunnels": [{"interface": "Tunnel10", "local_address": "...",
+                                      "peer_address": "...", "status": "UP-ACTIVE",
+                                      "path": ["optional", "explicit", "hops"]}]}}
 
 Each tunnel's peer address is matched to whichever inventory host owns it;
 both ends' reports are merged into one tunnel. The underlay path is the
@@ -17,13 +17,10 @@ on the same router converge into parallel lanes (see bundling.py).
 """
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 
 from features import Feature
 from features.bundling import plan_overlays
-
-CMD = "show crypto session detail"
 
 
 @dataclass
@@ -40,62 +37,13 @@ class Tunnel:
 
 
 # ---------------------------------------------------------------------------
-# CLI parsing
-# ---------------------------------------------------------------------------
-
-_SA_RE = re.compile(r"IKEv[12] SA:\s+local\s+([0-9a-fA-F:.]+)/\d+\s+remote\s+([0-9a-fA-F:.]+)/\d+")
-_FLOW_RE = re.compile(r"IPSEC FLOW:.*?host\s+([0-9a-fA-F:.]+)\s+host\s+([0-9a-fA-F:.]+)")
-
-
-def parse_ios_crypto_session(text: str) -> list[dict]:
-    """Cisco IOS / IOS-XE `show crypto session detail` -> tunnel records.
-
-    Output is a series of blocks starting with "Interface: X"; each has a
-    "Session status:" line, a "Peer: <addr> port ..." line and (when IKE
-    is up) an "IKEv1/IKEv2 SA: local A/500 remote B/500" line giving the
-    local address. A session with no IKE SA falls back to the IPSEC FLOW
-    host pair, and failing that leaves local_address unset.
-    """
-    tunnels = []
-    current = None
-
-    def flush():
-        if current and current.get("peer_address"):
-            tunnels.append(current)
-
-    for line in (text or "").splitlines():
-        s = line.strip()
-        if s.startswith("Interface:"):
-            flush()
-            current = {"interface": s.split(":", 1)[1].strip(), "local_address": None,
-                       "peer_address": None, "status": "UNKNOWN"}
-        elif current is None:
-            continue
-        elif s.startswith("Session status:"):
-            current["status"] = s.split(":", 1)[1].strip()
-        elif s.startswith("Peer:") and current["peer_address"] is None:
-            current["peer_address"] = s.split()[1]
-        elif (m := _SA_RE.search(s)) and current["local_address"] is None:
-            current["local_address"] = m.group(1)
-            current["peer_address"] = current["peer_address"] or m.group(2)
-        elif (m := _FLOW_RE.search(s)) and current["local_address"] is None:
-            if m.group(2) == current["peer_address"]:
-                current["local_address"] = m.group(1)
-    flush()
-    return tunnels
-
-
-PARSERS = {"ios": parse_ios_crypto_session}
-
-
-# ---------------------------------------------------------------------------
 # Feature
 # ---------------------------------------------------------------------------
 
 class IpsecFeature(Feature):
     name = "ipsec"
     label = "IPsec tunnels"
-    commands = {"ios": [CMD]}
+    facet = "ipsec"
     SETTINGS = {
         "up_color": "#7F00FF",
         "down_color": "#CC0000",
@@ -108,14 +56,7 @@ class IpsecFeature(Feature):
     }
 
     def host_tunnels(self, topo, host) -> list[dict]:
-        pre = (topo.hosts[host].get("ipsec") or {}).get("tunnels")
-        if pre is not None:
-            return pre
-        parser = PARSERS.get(topo.platform(host))
-        text = topo.cli(host, CMD)
-        if parser is None or text is None:
-            return []
-        return parser(text)
+        return (topo.facet(host, self.facet) or {}).get("tunnels") or []
 
     def collect(self, topo) -> list[Tunnel]:
         merged: dict[tuple, dict] = {}

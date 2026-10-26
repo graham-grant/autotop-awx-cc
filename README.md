@@ -13,8 +13,9 @@ job. See [Read-only collection](#read-only-collection).
 
 The diagram is built in two parts:
 
-- **The physical diagram.** One node per inventory device, and one link for
-  every subnet two devices share. Links are routed around the nodes so they
+- **The physical diagram.** One node per inventory device, one link for
+  every subnet two devices share, and a small segment node for a subnet
+  three or more devices share. Links are routed around the nodes so they
   never overlap, and each end is labelled with its interface, coloured green
   or red by link status.
 - **Feature layers.** Everything else (IPsec tunnels today; VRFs, VLANs,
@@ -52,7 +53,7 @@ Contents:
 | `scripts/commands.py` | Works out which show commands to run on a device |
 | `scripts/readonly.py` | The read-only command policy every command must pass before it is sent |
 | `scripts/audit.py` | Re-checks the commands recorded for every device after collection |
-| `scripts/netparse/` | Parses raw show output into structured interface data, one module per platform |
+| `scripts/drivers/` | Platform drivers: turn each platform's output into the common device record (schema 2), one module per platform |
 | `scripts/main.py` | Entry point for building the diagram |
 | `scripts/parser.py` | Loads the JSON files and derives links from shared subnets |
 | `scripts/drawio_position_loader.py` | Reads and writes node positions in `template.drawio` |
@@ -153,25 +154,64 @@ which does the following:
    the rest still run. Finally it reads the marker again.
 5. Every line it sends is checked against the read-only policy first and
    printed in the job log as it is sent.
-6. It writes the raw output to `output/facts/<inventory name>.json`, with a
-   record of every line sent and the result of the configuration check:
-
-   ```json
-   {"inventory_name": "core-rtr1", "platform": "ios",
-    "cli": {"show version": "...", "show interfaces": "...", "...": "..."},
-    "audit": {"policy": "ios",
-              "commands": [{"time": "2026-10-26T01:00:03+00:00", "command": "show version",
-                            "kind": "collect", "status": "ok"}, "..."],
-              "config_check": {"status": "unchanged", "command": "...",
-                               "before": "! Last configuration change at ...",
-                               "after": "! Last configuration change at ..."}}}
-   ```
-
+6. The platform's driver parses the output, and the result is written to
+   `output/facts/<inventory name>.json` in the common device format
+   (see [Device facts format](#device-facts-format)), with the raw output, a
+   record of every line sent and the result of the configuration check.
    If the marker changed, the file is still written, and the host fails with
    exit code 3 and a `CONFIGURATION CHANGED DURING COLLECTION` message.
 
 Collection is the only step that talks to the devices. Everything after it,
 features included, works from these JSON files.
+
+### Device facts format
+
+Every device, whatever its vendor, gets one file with the same shape
+(`"schema": 2`). A shared **core** holds the layer 1 to 3 data every device
+has, and the physical diagram reads only that. Optional **facets** hold data
+that depends on what the device does, each in one vendor-neutral shape owned
+by the feature that draws it. **raw** keeps exactly what was collected.
+
+```json
+{"schema": 2,
+ "device": {"name": "core-rtr1", "hostname": "core-rtr1", "role": "router",
+            "vendor": "cisco", "platform": "ios", "model": "C8000V",
+            "os_version": "17.18.02", "serial": "9AAR82D4VBB",
+            "collected_at": "2026-10-26T01:00:00+00:00", "collector": "ssh-cli"},
+ "interfaces": [{"name": "GigabitEthernet1", "kind": "physical",
+                 "mac": "52:54:00:12:34:56", "admin_up": true, "oper_up": true,
+                 "speed_mbps": 1000, "mtu": 1500, "description": "to core-rtr2",
+                 "vrf": "default", "vlan": null, "parent": null,
+                 "ipv4": ["10.0.12.1/30"], "ipv6": []}],
+ "neighbors": [], "arp": [], "mac_table": [],
+ "facets": {"ipsec": {"tunnels": [{"interface": "Tunnel10", "local_address": "172.16.0.1",
+                                   "peer_address": "172.16.0.11", "status": "UP-ACTIVE"}]}},
+ "raw": {"show version": "...", "show interfaces": "...", "...": "..."},
+ "audit": {"policy": "ios",
+           "commands": [{"time": "2026-10-26T01:00:03+00:00", "command": "show version",
+                         "kind": "collect", "status": "ok"}, "..."],
+           "config_check": {"status": "unchanged", "command": "...",
+                            "before": "! Last configuration change at ...",
+                            "after": "! Last configuration change at ..."}}}
+```
+
+- `kind` is `physical`, `subinterface`, `lag`, `vlan`, `loopback`, `tunnel`
+  or `virtual`. `parent` is the parent interface of a subinterface.
+- `vrf` comes from `show ip interface` on IOS, and is `default` for the
+  global table.
+- `neighbors` (LLDP/CDP), `arp` and `mac_table` are part of the core but
+  are empty until phase 2 of the
+  [multi-vendor design](docs/design-archive/2026-10-26/multi-vendor-device-data-design.md)
+  collects them.
+- Older files are upgraded when they are read: the earlier raw format
+  (`"cli": {...}`) is parsed with the current driver, and the NAPALM-based
+  format is converted. A file with a newer schema number than the code
+  understands is refused.
+- Because raw output is kept, a parser fix can be applied to files that were
+  already collected, without logging in again:
+  `python3 scripts/main.py output/facts output --reparse`.
+- If a parser fails on a device, the file is still written with its raw
+  output and a `parse_error`, and the device appears with no links.
 
 **Play 3: copy the facts (`artifact_server`).**
 It copies `output/facts/` to the artifact server, so the raw data outlives
@@ -209,7 +249,7 @@ left to the command lists. The full design is in
 | Confirmations are never answered | `scripts/sshcli.py` | If a device asks `[confirm]`, `[yes/no]`, `(y/n)` or `...]?`, the session sends Ctrl-C, stops using the session and fails the host. A command that times out is also cancelled with Ctrl-C before anything else is sent. |
 | Plan before connecting | `collect.py --plan`, play 1 | Prints every command per platform and stops the job if any would be refused. |
 | Audit trail | `sshcli.py`, `collect.py` | Every line sent is printed in the job log and stored with a timestamp and outcome in the facts file. |
-| Configuration-change check | `collect.py`, `netparse/ios.py` | The IOS `Last configuration change` marker is read before and after collection. If it moved, the host fails loudly. If it can't be read (for example, an account below privilege 15), a warning says so. |
+| Configuration-change check | `collect.py`, `drivers/ios.py` | The IOS `Last configuration change` marker is read before and after collection. If it moved, the host fails loudly. If it can't be read (for example, an account below privilege 15), a warning says so. |
 | Verification after the run | `scripts/audit.py`, play 6 | Re-checks every recorded command and the configuration check, and fails the job on any problem. |
 | Command inventory test | `tests/test_readonly.py` | Checks every command any driver or feature can emit, enabled or not, against its platform's policy, and checks a list of dangerous commands is refused. A new command that isn't read-only fails the tests. |
 
@@ -231,21 +271,32 @@ audit.
 
 `scripts/main.py` turns the JSON files into `topology.drawio`:
 
-1. **Parse.** `parser.py` loads every JSON file, and `netparse/` turns each
-   device's raw output into structured data: hostname, interfaces (up/down,
-   enabled, speed, MTU, MAC) and interface IPv4 addresses. Files in the older
-   NAPALM-based format are still read as they are.
+1. **Load.** `parser.py` reads every JSON file as a schema 2 record,
+   upgrading older files (see [Device facts format](#device-facts-format)).
+   With `--reparse`, each file is re-parsed from its raw output first.
 2. **Derive links.** Every interface address is grouped by subnet. A subnet
    shared by exactly two devices becomes a link between them. That's what a
    directly connected route means, so CDP and LLDP aren't needed. A subnet
    only one device has (an uplink to something not in the inventory) is
-   skipped. A subnet three or more devices share is drawn as a full mesh,
-   with a note in the log. Subnets in `config.EXCLUDED_NETWORKS` (such as a
-   management network) are ignored. A link is up unless either end reports
-   its interface as down.
+   skipped. Subnets in `config.EXCLUDED_NETWORKS` (such as a management
+   network) are ignored. A link is up unless either end reports its
+   interface as down.
+   - **Shared segments.** A subnet three or more devices share becomes a
+     small rounded segment node, labelled with its network (and its VLAN,
+     if every member's interface is on the same one), with one link from
+     each device to it. This replaces a full mesh, which grows with the
+     square of the number of devices.
+   - **VRFs.** If the same address appears on two devices in one subnet,
+     the subnet is being reused, so its members are grouped by VRF and each
+     VRF's members are linked separately. Without reuse, VRF names are
+     ignored, because they only mean something on one device: a PE's
+     customer VRF and the CE's global table share a /30 and must still be
+     linked.
 3. **Place nodes.** Positions come from `template.drawio` at the project
    root (see [Node positions](#node-positions)). Devices that aren't in it
-   yet are put in a staging grid below the rest.
+   yet are put in a staging grid below the rest. A segment node that isn't
+   in it yet is put between its members, moved down until it overlaps
+   nothing.
 4. **Route links.** `pathfinder.py` picks which side of each node every link
    leaves from and routes each link around the nodes so no two links overlap
    (see [Link routing](#link-routing)).
@@ -282,6 +333,10 @@ uses the new positions. Each run rewrites the file to match the inventory:
 existing nodes keep their positions, and new devices appear in the staging
 grid, ready to be dragged into place. Every node label in it must match an
 inventory host, so a typo stops the run instead of silently dropping a node.
+The exception is shared-segment nodes, whose labels start with `segment `
+(for example `segment 10.20.0.0/24`). They come from the facts rather than
+the inventory, can be dragged like any node, and are dropped from the
+template when the segment no longer exists.
 
 To force the side of a node that its links attach to, add a custom property
 named `side` with the value `top`, `bottom`, `left` or `right` to that node in
@@ -330,9 +385,11 @@ without disturbing each other or the base diagram:
 
 - **Own layer.** Each feature draws onto its own named draw.io layer, which
   viewers can show, hide or lock.
-- **Own data.** Each feature declares the show commands it needs per
-  platform. Collection picks them up automatically, so adding a feature never
-  means editing the playbook.
+- **Own data.** Each feature declares the facet it draws (`facet =
+  "ipsec"`) and never reads vendor output. Each platform driver says which
+  commands supply that facet and parses them into the facet's shape.
+  Collection gathers those commands for every enabled feature, so adding a
+  feature never means editing the playbook.
 - **Own copy of the topology.** Each feature gets a private copy of the
   devices, links and routed geometry, so it can't change what another
   feature sees.
@@ -352,18 +409,18 @@ A feature runs in three steps:
 
 | Step | Input | Output |
 | --- | --- | --- |
-| `collect(topo)` | Each device's JSON, through `topo.cli(host, command)` | The feature's parsed data |
+| `collect(topo)` | Each device's facet, through `topo.facet(host, name)`, and the core in `topo.hosts` | The feature's data |
 | `plan(data, topo)` | Parsed data plus the routed physical diagram | Geometry: what to draw and where |
 | `render(plan, layer)` | The plan | Cells on the feature's layer |
 
-`topo` gives each step the devices, links and node geometry, plus helpers
-that most features need: which device owns an IP address, and the
-fewest-hops path between two devices.
+`topo` gives each step the devices, links, segments and node geometry, plus
+helpers that most features need: which device owns an IP address, and the
+fewest-hops path between two devices (which can cross a segment node).
 
 #### IPsec tunnels (`features/ipsec.py`)
 
-**Layer:** "IPsec tunnels". **Command:** `show crypto session detail`
-(IOS / IOS-XE).
+**Layer:** "IPsec tunnels". **Facet:** `ipsec`, supplied on IOS / IOS-XE
+from `show crypto session detail`.
 
 What it shows: every IPsec tunnel between two inventory devices, drawn as a
 curved, dashed line that passes over every router the tunnel crosses.
@@ -373,10 +430,10 @@ path.
 
 How it works:
 
-1. **Find the sessions.** Each device's `show crypto session detail` output
-   is parsed into sessions: tunnel interface, local address, peer address
-   and status. The local address comes from the IKE SA line, or from the
-   IPsec flow if IKE is down.
+1. **Read the sessions.** Each device's `ipsec` facet lists its sessions:
+   tunnel interface, local address, peer address and status. On IOS the
+   driver takes the local address from the IKE SA line, or from the IPsec
+   flow if IKE is down.
 2. **Find both ends.** Each peer address is looked up among every interface
    address on every device, loopbacks included. The device that owns it is
    the far end. A peer that isn't in the inventory is skipped.
@@ -397,45 +454,50 @@ How it works:
 Settings (`config.FEATURE_SETTINGS["ipsec"]`): `up_color`, `down_color`,
 `style`, `lane_spacing`, `converge_near`, `converge_far`, `transit_spacing`.
 
-If a device's tunnel data comes from somewhere other than this collector,
-its JSON can carry the tunnels already parsed, each with an optional explicit
-`path`, which then replaces the fewest-hops guess:
+A tunnel can carry an optional explicit `path`, which then replaces the
+fewest-hops guess. Tunnel data from another source can be written straight
+into a device's facet:
 
 ```json
-"ipsec": {"tunnels": [{"interface": "Tunnel10", "local_address": "203.0.113.1",
+"facets": {"ipsec": {"tunnels": [{"interface": "Tunnel10", "local_address": "203.0.113.1",
                        "peer_address": "198.51.100.7", "status": "UP-ACTIVE",
-                       "path": ["branch1", "isp-rtr", "hq"]}]}
+                       "path": ["branch1", "isp-rtr", "hq"]}]}}
 ```
 
 #### Adding a feature
 
-1. Create `scripts/features/<name>.py` with a subclass of `Feature`. Set
-   `name`, `label` (the layer name), `commands` (for example
-   `{"ios": ["show vrf detail"]}`) and `SETTINGS`. Implement `collect`, `plan`
-   and `render`, and end the module with `FEATURE = MyFeature()`. Overlays
-   that cross routers can reuse `features.bundling.plan_overlays`.
-2. Add the name to `config.ENABLED_FEATURES`.
-3. Add sample device output under `tests/fixtures/` and a
+1. Decide the facet's shape: the vendor-neutral data the feature needs,
+   documented in the feature module's docstring.
+2. In each driver that can supply it, add the facet's commands to
+   `FACET_COMMANDS` and its parsing to `parse_facets`.
+3. Create `scripts/features/<name>.py` with a subclass of `Feature`. Set
+   `name`, `label` (the layer name), `facet` and `SETTINGS`. Implement
+   `collect`, `plan` and `render`, and end the module with
+   `FEATURE = MyFeature()`. Overlays that cross routers can reuse
+   `features.bundling.plan_overlays`.
+4. Add the name to `config.ENABLED_FEATURES`.
+5. Add sample device output under `tests/fixtures/` and a
    `tests/test_<name>.py`.
-4. Every command in `commands` must pass the platform's read-only policy.
-   `tests/test_readonly.py` checks this automatically, for every feature
-   whether it is enabled or not.
+6. Every facet command must pass the platform's read-only policy.
+   `tests/test_readonly.py` checks this automatically, for every facet a
+   driver supplies, whether its feature is enabled or not.
 
 ### Adding a device platform
 
-Device platforms are separate from features. A platform tells collection
-what to run and tells `netparse` how to read the core output. To add one
-(NX-OS, EOS, PAN-OS and so on):
+Device platforms are separate from features. All of a platform's vendor
+knowledge lives in one driver module. To add one (NX-OS, PAN-OS, Windows
+and so on):
 
-1. Write `scripts/netparse/<platform>.py` with `CORE_COMMANDS`, optionally
-   `PAGING_COMMANDS` and `CONFIG_CHECK_COMMAND`, and `parse(cli)`, which
-   returns `hostname`, `interfaces` and `interfaces_ip` in the same shape as
-   `ios.py`.
-2. Register it in `_DRIVERS` and `_ALIASES` in `scripts/netparse/__init__.py`.
+1. Write `scripts/drivers/<platform>.py` with `TRANSPORT`, `VENDOR`,
+   `CORE_COMMANDS`, optionally `PAGING_COMMANDS` and
+   `CONFIG_CHECK_COMMAND`, `FACET_COMMANDS`, `parse_core(raw)` (returning
+   `device`, `interfaces`, `neighbors`, `arp` and `mac_table` in the shape
+   above) and `parse_facets(raw)`. `ios.py` is the example.
+2. Register it in `_DRIVERS` and `_ALIASES` in `scripts/drivers/__init__.py`.
 3. Add a read-only policy for it to `scripts/readonly.py`. Without one, the
    collector refuses to contact the platform, and the tests fail.
-4. For each feature that should work on the new platform, add its commands
-   and a parser to that feature.
+4. Features need no changes: any facet the driver supplies is drawn by the
+   feature that owns it.
 
 ## Configuration reference
 
@@ -448,6 +510,7 @@ All settings live in `scripts/config.py`:
 | `EXCLUDED_NETWORKS` | Subnets never drawn as links, including any smaller subnet inside them |
 | `NEW_NODE_GRID_*` | Layout of the staging grid for new devices |
 | `DEFAULT_NODE_W`, `DEFAULT_NODE_H` | Node size when the inventory doesn't set `w` / `h` |
+| `SEGMENT_NODE_W`, `SEGMENT_NODE_H`, `SEGMENT_NODE_STYLE` | Size and style of shared-segment nodes |
 | `HANAN_*` | Link routing, see [Link routing](#link-routing) |
 | `STATUS_UP_COLOR`, `STATUS_DOWN_COLOR` | Interface label colours |
 | `INTF_LABEL_STYLE`, `INTF_ABBREVIATIONS` | Interface label style and name abbreviations |
@@ -457,8 +520,11 @@ All settings live in `scripts/config.py`:
 `main.py` also takes these on the command line:
 
 ```bash
-python3 scripts/main.py [facts_dir] [output_dir] [--inventory=PATH] [--template=PATH] [--icon-library=PATH]
+python3 scripts/main.py [facts_dir] [output_dir] [--inventory=PATH] [--template=PATH] [--icon-library=PATH] [--reparse]
 ```
+
+`--reparse` re-parses each facts file's raw output with the current drivers
+before drawing.
 
 ## Running it
 
@@ -521,7 +587,10 @@ The fixtures in `tests/fixtures/` describe a six-router topology with three
 IPsec tunnels. The tests cover the YAML parser, the IOS parsers, the SSH
 session driver (against a fake `ssh`), the feature framework, the IPsec
 feature, the C extension against the Python reference, a full run of
-`main.py`, and the read-only safeguards. The fake `ssh` logs every line it
+`main.py`, the platform drivers and the facts format (including upgrading
+older files, and a check that schema 1 and schema 2 facts draw a
+byte-identical diagram), link inference (segments and VRF reuse), and the
+read-only safeguards. The fake `ssh` logs every line it
 receives, so the read-only tests compare what the "device" got with the
 audit record, and check that refused commands never reach it, that a
 confirmation prompt is cancelled rather than answered, and that a
@@ -539,8 +608,9 @@ configuration change fails the host.
 - Links come from IPv4 subnets. A device with only unnumbered or IPv6
   interfaces, or a pure layer-2 switch with no routed interfaces, won't
   connect to anything.
-- The design assumes point-to-point subnets (a /30 or /31 per link). Shared
-  segments are drawn as a full mesh.
+- Shared segments are drawn as one node per subnet. Which device is plugged
+  into which switch port isn't known until phase 2 adds LLDP/CDP and MAC
+  tables.
 - The IPsec path is the fewest-hops guess unless an explicit path is given.
 - Collection uses SSH and a CLI. Palo Alto will use the PAN-OS XML API, and
   Windows will use PowerShell over OpenSSH, as described in the multi-vendor

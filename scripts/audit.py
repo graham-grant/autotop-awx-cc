@@ -22,7 +22,7 @@ import json
 import sys
 from pathlib import Path
 
-import netparse
+import drivers
 import readonly
 
 SESSION_WORDS = ("enable", "exit")
@@ -36,7 +36,7 @@ def verify(record: dict) -> tuple[list[str], list[str]]:
         return ["no audit record: not collected by collect.py with the read-only "
                 "safeguards, so its commands can't be verified"], warnings
     try:
-        policy = readonly.policy_for(netparse.platform_key(record.get("platform")))
+        policy = readonly.policy_for(drivers.platform_key(_platform(record)))
     except readonly.CommandRefused as e:
         return [str(e)], warnings
     for entry in audit.get("commands", []):
@@ -59,6 +59,14 @@ def verify(record: dict) -> tuple[list[str], list[str]]:
     return problems, warnings
 
 
+def _platform(record: dict):
+    return (record.get("device") or {}).get("platform") or record.get("platform")
+
+
+def _name(record: dict, default: str) -> str:
+    return (record.get("device") or {}).get("name") or record.get("inventory_name") or default
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if len(argv) != 1:
@@ -70,7 +78,7 @@ def main(argv=None):
     sent = 0
     for path in files:
         record = json.loads(path.read_text(encoding="utf-8"))
-        name = record.get("inventory_name", path.stem)
+        name = _name(record, path.stem)
         problems, warnings = verify(record)
         commands = (record.get("audit") or {}).get("commands", [])
         sent += len(commands)

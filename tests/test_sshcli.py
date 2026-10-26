@@ -70,8 +70,10 @@ class CollectTest(unittest.TestCase):
                 mock.patch.object(collect, "commands",
                                   lambda p: ["show version", "show bogus", "show interfaces status"]):
             rec = collect.collect("AT-8K-1", "sw", "ios", timeout=10, command_timeout=10)
-        self.assertEqual(rec["inventory_name"], "AT-8K-1")
-        self.assertEqual(list(rec["cli"]), ["show version", "show interfaces status"])
+        self.assertEqual(rec["schema"], 2)
+        self.assertEqual(rec["device"]["name"], "AT-8K-1")
+        self.assertIsNotNone(rec["device"]["collected_at"])
+        self.assertEqual(list(rec["raw"]), ["show version", "show interfaces status"])
         self.assertEqual(rec["audit"]["config_check"]["status"], "unchanged")
 
 

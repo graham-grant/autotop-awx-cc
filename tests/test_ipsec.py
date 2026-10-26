@@ -3,11 +3,11 @@ import math
 import unittest
 
 import support
-import netparse
 import parser as facts_parser
 from pathfinder import Node
 from features.context import Topology
-from features.ipsec import FEATURE as IPSEC, parse_ios_crypto_session
+from features.ipsec import FEATURE as IPSEC
+from drivers.ios import parse_crypto_session as parse_ios_crypto_session
 from features import Layer
 
 # Same layout as fixtures/template.drawio: hq on top, core1/core2 in the
@@ -20,7 +20,7 @@ LAYOUT = {
 
 def fixture_topology():
     hosts = facts_parser.load_nodes(support.FACTS)
-    edges = facts_parser.extract_edges(hosts)
+    edges, _ = facts_parser.extract_links(hosts)
     nodes = [Node(name, x, y, 230, 42) for name, (x, y) in LAYOUT.items()]
     return Topology(hosts, edges, nodes)
 
@@ -66,8 +66,8 @@ class IpsecCollectTest(unittest.TestCase):
     def test_prenormalized_records_and_explicit_path(self):
         topo = fixture_topology()
         for host in topo.hosts.values():
-            host.pop("cli", None)
-        topo.hosts["hq"]["ipsec"] = {"tunnels": [{
+            host["facets"].pop("ipsec", None)
+        topo.hosts["hq"]["facets"]["ipsec"] = {"tunnels": [{
             "interface": "Tunnel9", "local_address": "172.16.0.1",
             "peer_address": "172.16.0.12", "status": "up",
             "path": ["hq", "core1", "core2", "branch2"]}]}
@@ -78,8 +78,8 @@ class IpsecCollectTest(unittest.TestCase):
     def test_unknown_peer_skipped(self):
         topo = fixture_topology()
         for host in topo.hosts.values():
-            host.pop("cli", None)
-        topo.hosts["hq"]["ipsec"] = {"tunnels": [{
+            host["facets"].pop("ipsec", None)
+        topo.hosts["hq"]["facets"]["ipsec"] = {"tunnels": [{
             "interface": "Tunnel9", "local_address": "172.16.0.1",
             "peer_address": "203.0.113.9", "status": "UP-ACTIVE"}]}
         self.assertEqual(IPSEC.collect(topo), [])

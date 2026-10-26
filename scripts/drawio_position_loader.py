@@ -8,7 +8,9 @@ unchanged:
 
     centers[name] = (pinned[name]["x"], pinned[name]["y"])
 
-Every node label found in the diagram must match a host in inventory.yml.
+Every node label found in the diagram must match a host in inventory.yml,
+except shared-segment nodes, whose labels start with "segment " (they come
+from the facts, not the inventory, and a stale one is simply unused).
 Hosts in the inventory with no matching node in the diagram are left
 unpinned (same opt-in semantics as before) rather than treated as errors.
 """
@@ -38,6 +40,7 @@ def _label_text(raw: str | None) -> str:
 
 
 _RESERVED_OBJECT_ATTRS = {"id", "label"}
+SEGMENT_PREFIX = "segment "
 
 
 def load_pinned_positions_from_drawio(drawio_path: str | Path, inventory_path: str | Path) -> dict:
@@ -83,7 +86,7 @@ def load_pinned_positions_from_drawio(drawio_path: str | Path, inventory_path: s
         if not name:
             continue
 
-        if name not in inventory_hosts:
+        if name not in inventory_hosts and not name.startswith(SEGMENT_PREFIX):
             unknown.append(name)
             continue
 
@@ -103,7 +106,7 @@ def load_pinned_positions_from_drawio(drawio_path: str | Path, inventory_path: s
             f"{sorted(set(unknown))}"
         )
 
-    unpinned = inventory_hosts - pinned.keys()
+    unpinned = inventory_hosts - pinned.keys()  # segments aren't reported
     if unpinned:
         print(f"No pinned position for {sorted(unpinned)} -- will use auto layout.")
 
