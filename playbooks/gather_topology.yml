@@ -14,6 +14,15 @@
 # enabled feature plugin (scripts/features/) asks for. Adding a feature
 # never needs an edit here.
 #
+# Read-only: collection never changes a device. Play 1 prints the exact
+# commands that will be sent per platform, checked against the read-only
+# policy (scripts/readonly.py), and stops the job before any device is
+# contacted if one would be refused. collect.py checks every command again
+# as it is sent, logs each one, and compares the device's config-change
+# marker before and after. The last play (scripts/audit.py) re-verifies
+# every recorded command from the facts files and fails the job if anything
+# was out of policy or a configuration changed.
+#
 # Usage:
 #   export NET_USERNAME=admin
 #   export NET_PASSWORD=secret
@@ -38,6 +47,22 @@
       args:
         chdir: "{{ playbook_dir }}/../scripts"
       changed_when: false
+
+    # Every platform in the inventory must have a read-only policy, and
+    # every command collection will send must pass it, before any device
+    # is contacted. The plan is printed so the job log shows exactly what
+    # will be run.
+    - name: Check the read-only command plan for each platform
+      command: python3 collect.py --plan --platform {{ item }}
+      args:
+        chdir: "{{ playbook_dir }}/../scripts"
+      loop: "{{ groups['network_devices'] | map('extract', hostvars, 'ansible_network_os') | unique | list }}"
+      register: command_plan
+      changed_when: false
+
+    - name: Show the read-only command plan
+      debug:
+        msg: "{{ command_plan.results | map(attribute='stdout_lines') | list }}"
 
 - name: Gather show-command output from all inventory devices
   hosts: network_devices
@@ -77,7 +102,14 @@
         NET_USERNAME: "{{ net_username }}"
         NET_PASSWORD: "{{ net_password }}"
         NET_ENABLE_PASSWORD: "{{ net_enable_password }}"
+      register: collect_result
       changed_when: false
+
+    # Every line sent to the device, as collect.py logged it (the full
+    # record is also in the facts file under "audit")
+    - name: Show the commands sent to the device
+      debug:
+        var: collect_result.stdout_lines
 
 - name: Push all gathered facts to artifact server
   hosts: artifact_server
@@ -113,3 +145,29 @@
       ansible.builtin.copy:
         src: "{{ playbook_dir }}/../output/topology.drawio"
         dest: /home/hp/Projects/autotop-awx/topology.drawio
+
+- name: Verify every command sent was read-only
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  tasks:
+    # Re-checks each facts file's audit against the read-only policy and
+    # the config-change result. Runs last, so the diagram is still
+    # published, but fails the job if anything was out of policy.
+    - name: Audit the commands recorded in the facts files
+      command: >-
+        python3 {{ playbook_dir }}/../scripts/audit.py
+        {{ playbook_dir }}/../output/facts
+      register: audit_result
+      changed_when: false
+      failed_when: false
+
+    - name: Show the read-only audit
+      debug:
+        var: audit_result.stdout_lines
+
+    - name: Fail the job if the audit found a problem
+      assert:
+        that: audit_result.rc == 0
+        fail_msg: "Read-only audit failed - see the audit output above."
+        quiet: true

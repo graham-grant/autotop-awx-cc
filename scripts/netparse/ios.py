@@ -8,6 +8,10 @@ import re
 
 CORE_COMMANDS = ["show version", "show interfaces", "show ip interface"]
 PAGING_COMMANDS = ["terminal length 0"]
+# Run before and after collection: the "! Last configuration change at ...
+# by ..." line from the running config. If it moves while we are logged in,
+# collection fails loudly (see collect.py and scripts/readonly.py).
+CONFIG_CHECK_COMMAND = "show running-config | include configuration change"
 
 # "GigabitEthernet0/1 is up, line protocol is up (connected)"
 # "Vlan10 is administratively down, line protocol is down"

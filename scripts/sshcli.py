@@ -15,11 +15,18 @@ This drives the system `ssh` client (present on every AWX execution
 environment) through a pseudo-terminal from the `pty` module, and answers
 prompts the way a person at a terminal would:
 
-    with CliSession(host, username, password) as s:
+    with CliSession(host, username, password,
+                    policy=readonly.policy_for("ios")) as s:
         s.disable_paging(["terminal length 0", "terminal datadump"])
         text = s.run("show version")
 
 Credentials are written to the pty, never put on a command line.
+
+Read-only by construction: run() sends a command only if the session's
+readonly.Policy allows it (no policy, nothing is sent), never answers a
+confirmation prompt (it cancels it with Ctrl-C and raises), and records
+every line it sends to the device in `audit`. The only other things ever
+typed are the login answers, "enable" and "exit".
 """
 from __future__ import annotations
 
@@ -31,6 +38,9 @@ import select
 import shutil
 import signal
 import time
+from datetime import datetime, timezone
+
+import readonly
 
 _ANSI = re.compile(rb"\x1b\[[0-9;?]*[A-Za-z]|\x1b[()][A-Za-z0-9]|\x1b[=>]")
 # Paging prompts, removed from captured output after we answer them
@@ -45,6 +55,12 @@ _PASS_PROMPT = re.compile(rb"password\s*:\s*$", re.IGNORECASE)
 _HOSTKEY_PROMPT = re.compile(rb"continue connecting.*\?\s*$", re.IGNORECASE)
 # A CLI prompt at the end of the buffer: "AT-8K-1#", "core1>", "sw(config)#"
 _CLI_PROMPT = re.compile(rb"(?:^|[\r\n])([^\r\n]{1,80}?[>#])\s*$")
+# A device asking us to confirm something. A read-only command never does
+# this, so it is cancelled, never answered: "[confirm]", "[yes/no]",
+# "(y/n)", "Destination filename [startup-config]?"
+_CONFIRM_PROMPT = re.compile(rb"(?:\[confirm\]|\[yes/no\]|\(yes/no\)\??|\[y/n\]|\(y/n\)\??|"
+                             rb"\]\?)\s*:?\s*$", re.IGNORECASE)
+_CTRL_C = b"\x03"
 _AUTH_FAILED = re.compile(rb"(permission denied|authentication failed|access denied|"
                           rb"login invalid|bad (user ?name|password)|% ?login invalid)",
                           re.IGNORECASE)
@@ -62,7 +78,8 @@ class CliSession:
     def __init__(self, host: str, username: str, password: str, port: int = 22,
                  enable_password: str | None = None, ssh_args: list[str] | None = None,
                  timeout: float = 30.0, command_timeout: float = 120.0,
-                 ssh_binary: str = "ssh"):
+                 ssh_binary: str = "ssh", policy: readonly.Policy | None = None,
+                 log=None):
         self.host, self.port = host, int(port)
         self.username, self.password = username, password
         self.enable_password = enable_password
@@ -74,6 +91,12 @@ class CliSession:
         self.fd = None
         self.prompt: bytes | None = None
         self.transcript = bytearray()  # everything received, for error messages
+        self.policy = policy
+        self.log = log or (lambda line: None)
+        # Every line typed at the device after login, credentials excepted:
+        # [{"time", "command", "kind": "session"|"collect", "status"}]
+        self.audit: list[dict] = []
+        self._abandoned = None  # reason, once the session can't be trusted
 
     # -- process / io ----------------------------------------------------
 
@@ -122,6 +145,13 @@ class CliSession:
             raise CliError(f"{self.host}: connection closed\n{self._tail()}")
         self.transcript += data
         return data
+
+    def _record(self, command: str, kind: str, status: str) -> dict:
+        entry = {"time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                 "command": command, "kind": kind, "status": status}
+        self.audit.append(entry)
+        self.log(f"{status:>8}  {command}")
+        return entry
 
     def _tail(self, n=600) -> str:
         text = _ANSI.sub(b"", bytes(self.transcript[-n:])).decode("utf-8", "replace")
@@ -177,6 +207,7 @@ class CliSession:
         return self
 
     def _enable(self):
+        self._record("enable", "session", "sent")
         self._send("enable")
         deadline = time.monotonic() + self.timeout
         buf = b""
@@ -198,17 +229,33 @@ class CliSession:
         base = re.escape(re.sub(rb"[>#]$", b"", self.prompt).split(b"(")[0])
         return re.compile(rb"(?:^|[\r\n])" + base + rb"(?:\([^)]*\))?[>#]\s*$")
 
-    def run(self, command: str, timeout: float | None = None) -> str:
+    def run(self, command: str, timeout: float | None = None, kind: str = "collect") -> str:
         """Run one command and return its output, without the echoed
-        command or the trailing prompt."""
+        command or the trailing prompt. Raises readonly.CommandRefused,
+        before anything is sent, if the session's policy doesn't allow it."""
         if self.prompt is None:
             raise CliError("session not open")
+        if self._abandoned:
+            raise CliError(f"{self.host}: session abandoned ({self._abandoned}), "
+                           f"not sending {command!r}")
+        if self.policy is None:
+            self._record(command, kind, "refused")
+            raise readonly.CommandRefused(f"{self.host}: no read-only policy for this "
+                                          f"session, not sending {command!r}")
+        try:
+            self.policy.check(command)
+        except readonly.CommandRefused:
+            self._record(command, kind, "refused")
+            raise
         prompt_re = self._prompt_re()
+        entry = self._record(command, kind, "sent")
         self._send(command)
         deadline = time.monotonic() + (timeout or self.command_timeout)
         buf = b""
         while True:
             if time.monotonic() > deadline:
+                entry["status"] = "timeout"
+                self._cancel(prompt_re, f"timed out running {command!r}")
                 raise CliError(f"{self.host}: timed out running {command!r}\n{self._tail()}")
             data = self._read_some(deadline)
             if not data:
@@ -220,7 +267,36 @@ class CliSession:
                 continue
             if prompt_re.search(tail.rstrip(b" ")):
                 break
+            if _CONFIRM_PROMPT.search(tail.rstrip(b" ")):
+                entry["status"] = "cancelled"
+                self._cancel(prompt_re, f"{command!r} asked for confirmation")
+                self._abandoned = f"{command!r} asked for confirmation"
+                raise readonly.UnexpectedPrompt(
+                    f"{self.host}: {command!r} asked for confirmation, which a read-only "
+                    f"command never does. Cancelled with Ctrl-C, not answered.\n{self._tail()}")
+        entry["status"] = "ok"
         return self._clean(buf, command, prompt_re)
+
+    def _cancel(self, prompt_re: re.Pattern, why: str):
+        """Send Ctrl-C and wait for the prompt to come back, so nothing we
+        send next can be taken as the answer to whatever the device was
+        waiting for. If it doesn't come back, stop using the session."""
+        self.log(f"{'ctrl-c':>8}  ({why})")
+        try:
+            os.write(self.fd, _CTRL_C)
+        except OSError:
+            self._abandoned = why
+            return
+        deadline = time.monotonic() + min(self.timeout, 10.0)
+        buf = b""
+        while time.monotonic() < deadline:
+            try:
+                buf += self._read_some(deadline)
+            except CliError:
+                break
+            if prompt_re.search(_ANSI.sub(b"", buf[-200:]).rstrip(b" ")):
+                return
+        self._abandoned = why
 
     @staticmethod
     def _clean(buf: bytes, command: str, prompt_re: re.Pattern) -> str:
@@ -244,10 +320,11 @@ class CliSession:
 
     def disable_paging(self, commands: list[str]):
         """Try each paging-off command; unknown ones just error harmlessly.
-        Paging prompts are answered regardless, so this is an optimisation."""
+        Paging prompts are answered regardless, so this is an optimisation.
+        A command the policy refuses still raises."""
         for cmd in commands:
             try:
-                self.run(cmd, timeout=self.timeout)
+                self.run(cmd, timeout=self.timeout, kind="session")
             except CliError:
                 pass
 
@@ -255,6 +332,8 @@ class CliSession:
         if self.fd is None:
             return
         try:
+            if self.prompt is not None:
+                self._record("exit", "session", "sent")
             self._send("exit")
             time.sleep(0.2)
         except OSError:
