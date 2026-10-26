@@ -28,3 +28,4 @@ each change can still be read after the code has moved on.
 | 2026-10-26 | [Phase 1: common device format and Cisco driver](2026-10-26/phase-1-common-format.md) | Implemented. Schema 2 facts, `scripts/drivers/`, IPsec as a facet, segment nodes, VRF reuse rule. |
 | 2026-10-26 | [Phase 2: Cisco layer 2](2026-10-26/phase-2-cisco-layer-2.md) | Implemented. LLDP/CDP, ARP and MAC tables, links from evidence, port-channel collapse, VLANs facet and layer. |
 | 2026-10-26 | [Phase 3: Palo Alto firewalls](2026-10-26/phase-3-palo-alto.md) | Implemented and tested against a fake XML API; lab firewall check pending. PAN-OS policy, XML API session, direct and Panorama modes, zones layer. |
+| 2026-10-26 | [Phase 4: Windows servers](2026-10-26/phase-4-windows.md) | Implemented and tested against a fake OpenSSH server; lab server check pending. PowerShell script policy, PowerShell-over-OpenSSH session, NIC teams, placement by MAC table, server roles layer. |

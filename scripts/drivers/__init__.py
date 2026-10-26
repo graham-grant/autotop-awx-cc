@@ -23,11 +23,13 @@ physical diagram reads. Facets are optional, one documented shape each,
 owned by the feature that draws it. Raw output is always kept, so a parser
 fix can be applied to old files with reparse() without logging in again.
 
-A driver module declares TRANSPORT ("ssh-cli" or "xml-api"), VENDOR,
+A driver module declares TRANSPORT ("ssh-cli", "xml-api" or
+"powershell-ssh"), VENDOR,
 CORE_COMMANDS, optional PAGING_COMMANDS, CONFIG_CHECK_COMMAND and
 config_marker(output), FACET_COMMANDS ({facet: [commands]}),
 parse_core(raw) and parse_facets(raw). For "xml-api" a command is an API
-request's query string (see readonly.XmlApiPolicy).
+request's query string (see readonly.XmlApiPolicy), and for
+"powershell-ssh" it names a fixed script (readonly.PowerShellPolicy).
 
 Adding a platform: write the module, add it to _DRIVERS / _ALIASES below,
 and give it a read-only policy in scripts/readonly.py - without one the
@@ -35,16 +37,17 @@ collector refuses to contact it.
 """
 from __future__ import annotations
 
-from drivers import ios, panos
+from drivers import ios, panos, windows
 
 SCHEMA = 2
 
-_DRIVERS = {"ios": ios, "panos": panos}
+_DRIVERS = {"ios": ios, "panos": panos, "windows": windows}
 
 # Ansible network_os / NAPALM driver names -> driver
 _ALIASES = {
     "ios": "ios", "iosxe": "ios", "ios-xe": "ios", "cisco.ios.ios": "ios",
     "panos": "panos", "pan-os": "panos", "paloaltonetworks.panos": "panos",
+    "windows": "windows", "win": "windows",
 }
 
 # Tried in order after login when a driver doesn't say; an unknown one just
@@ -90,7 +93,7 @@ def config_marker(network_os: str, output: str) -> str | None:
 
 
 def transport(network_os: str) -> str | None:
-    """How a platform is collected: "ssh-cli" or "xml-api"."""
+    """How a platform is collected: "ssh-cli", "xml-api" or "powershell-ssh"."""
     return getattr(driver_for(network_os), "TRANSPORT", None)
 
 

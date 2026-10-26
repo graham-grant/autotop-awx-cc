@@ -16,7 +16,9 @@ the platform's policy allows it. Three rules, all of which must pass:
                   could smuggle a second command onto the line.
 
 PAN-OS is reached through its XML API rather than a CLI, so its policy
-(XmlApiPolicy) checks API request parameters instead; see that class.
+(XmlApiPolicy) checks API request parameters instead, and Windows runs
+fixed PowerShell scripts whose every command PowerShellPolicy checks; see
+those classes.
 
 A platform without a policy gets nothing: collection refuses to connect.
 Adding a platform means adding its policy here, and the command-inventory
@@ -224,9 +226,157 @@ class XmlApiPolicy:
             return False
 
 
+class PowerShellPolicy:
+    """The Windows policy. A command names one of the fixed PowerShell
+    scripts in scripts/drivers/powershell/, optionally pinned to its
+    SHA-256 (the session records the pinned form in the audit):
+
+        powershell:windows_core.ps1
+        powershell:windows_core.ps1#sha256=3f2a...
+
+    The script is read from the repository and checked statement by
+    statement before anything connects, and the session sends exactly the
+    text that was checked (as -EncodedCommand). A script passes only if:
+
+      - every command it runs is in ALLOWED_COMMANDS: a list of Get-*
+        cmdlets that only read, plus the formatting cmdlets;
+      - Where-Object and ForEach-Object only take a script block (which is
+        checked like the rest; a bare member name would call a method);
+      - it assigns only to plain variables, never to an object's property;
+      - it has no call operator (&), dot-sourcing, method calls (.Name()),
+        static members (::), type literals other than [ordered] and
+        [pscustomobject], double-quoted or here-strings (no interpolation),
+        subexpressions, redirection (> <), backticks, block comments or
+        any character outside the plain PowerShell it needs.
+    """
+
+    ALLOWED_COMMANDS = {
+        "get-ciminstance", "get-netadapter", "get-netipaddress", "get-netneighbor",
+        "get-netlbfoteam", "get-netlbfoteammember", "get-windowsfeature",
+        "convertto-json", "select-object", "where-object", "foreach-object", "sort-object",
+    }
+    KEYWORDS = {"if", "elseif", "else", "foreach", "in"}
+    TYPES = {"[ordered]", "[pscustomobject]"}
+    _NAME = re.compile(r"powershell:([a-z0-9_-]+\.ps1)(?:#sha256=([0-9a-f]{64}))?")
+    _TOKEN = re.compile(r"""
+        (?P<nl>\r?\n) | (?P<ws>[ \t]+) | (?P<comment>\#[^\r\n]*) |
+        (?P<str>'(?:[^'\r\n]|'')*') |
+        (?P<var>\$[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*) |
+        (?P<num>\d+) |
+        (?P<param>-[A-Za-z]\w*) |
+        (?P<type>\[[A-Za-z]+\]) |
+        (?P<word>[A-Za-z_]\w*(?:-[A-Za-z_]\w*)?) |
+        (?P<punct>@\{|@\(|[{}();|,=.])
+    """, re.VERBOSE)
+    _COMMAND_START = {None, "nl", ";", "|", "{", "(", "@(", "="}
+
+    def __init__(self, name: str, script_dir):
+        self.name = name
+        self.script_dir = script_dir
+
+    def _refuse(self, what, why):
+        raise CommandRefused(f"{self.name}: {what!r} refused: {why}")
+
+    def script(self, command: str) -> str:
+        """The text of the script a command names, after checking it."""
+        import hashlib
+        from pathlib import Path
+
+        m = self._NAME.fullmatch(command or "")
+        if not m:
+            self._refuse(command, "not powershell:<script>.ps1 naming a fixed script")
+        path = Path(self.script_dir) / m.group(1)
+        if not path.is_file():
+            self._refuse(command, f"no script {m.group(1)} in {self.script_dir}")
+        text = path.read_text(encoding="utf-8")
+        if m.group(2) and hashlib.sha256(text.encode("utf-8")).hexdigest() != m.group(2):
+            self._refuse(command, "the script has changed since this was recorded")
+        self.check_script(text, m.group(1))
+        return text
+
+    def check_script(self, text: str, label: str = "script") -> None:
+        tokens = []  # (kind, value), whitespace and comments dropped
+        pos = 0
+        while pos < len(text):
+            m = self._TOKEN.match(text, pos)
+            if not m:
+                self._refuse(label, f"character {text[pos]!r} at offset {pos} is not allowed")
+            kind = m.lastgroup
+            value = m.group()
+            if kind in ("ws", "comment"):
+                pass
+            elif kind == "nl":
+                tokens.append(("nl", "nl"))
+            else:
+                tokens.append((kind, value))
+            pos = m.end()
+
+        stack = []          # open brackets: "hash", "block", "paren"
+        prev = None         # previous significant token value (or kind for nl)
+        for i, (kind, value) in enumerate(tokens):
+            nxt = tokens[i + 1] if i + 1 < len(tokens) else (None, None)
+            at_command = prev in self._COMMAND_START
+            if kind == "var" and "." in value and nxt[1] == "(":
+                self._refuse(label, f"method call {value}(")
+            if kind == "var" and "." in value and nxt[1] == "=":
+                self._refuse(label, f"assigning to a property ({value}) can change an object")
+            if kind == "type" and value.lower() not in self.TYPES:
+                self._refuse(label, f"type literal {value}")
+            if kind == "punct":
+                if value == "." and (at_command or nxt[1] in ("(",) or nxt[0] != "word"):
+                    self._refuse(label, "dot-sourcing or a method call")
+                if value == "." and i + 2 < len(tokens) and tokens[i + 2][1] == "(":
+                    self._refuse(label, f"method call .{nxt[1]}(")
+                if value in ("@{",):
+                    stack.append("hash")
+                elif value == "{":
+                    stack.append("block")
+                elif value in ("(", "@("):
+                    stack.append("paren")
+                elif value in ("}", ")"):
+                    if not stack:
+                        self._refuse(label, f"unbalanced {value}")
+                    stack.pop()
+            if kind == "word":
+                lower = value.lower()
+                if prev == ".":
+                    pass  # a property name
+                elif "-" in lower and lower not in self.ALLOWED_COMMANDS:
+                    self._refuse(label, f"{value} is not an allowed command")
+                elif at_command:
+                    if stack and stack[-1] == "hash" and nxt[1] == "=":
+                        pass  # a hashtable key
+                    elif lower in self.KEYWORDS:
+                        pass
+                    elif lower not in self.ALLOWED_COMMANDS:
+                        self._refuse(label, f"{value} is not an allowed command")
+                    elif lower in ("where-object", "foreach-object") and nxt[1] != "{":
+                        self._refuse(label, f"{value} must be given a script block")
+            prev = "nl" if kind == "nl" else value
+        if stack:
+            self._refuse(label, "unbalanced brackets")
+
+    def check(self, command: str) -> str:
+        self.script(command)
+        return command
+
+    def allows(self, command: str) -> bool:
+        try:
+            self.check(command)
+            return True
+        except CommandRefused:
+            return False
+
+
+def _script_dir():
+    from pathlib import Path
+    return Path(__file__).resolve().parent / "drivers" / "powershell"
+
+
 _POLICIES = {
     "ios": Policy("ios", _ios_allow),
     "panos": XmlApiPolicy("panos"),
+    "windows": PowerShellPolicy("windows", _script_dir()),
 }
 
 

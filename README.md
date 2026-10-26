@@ -1,9 +1,10 @@
 # autotop-awx: network topology diagrams from AWX
 
-This project logs in to the network devices in an Ansible inventory, collects
-their show-command output (over SSH for Cisco, and over the PAN-OS XML API
-for Palo Alto firewalls, directly or through Panorama), and draws a draw.io
-diagram of how they connect.
+This project logs in to the network devices and servers in an Ansible
+inventory, collects their show-command output (over SSH for Cisco, over the
+PAN-OS XML API for Palo Alto firewalls, directly or through Panorama, and as
+fixed PowerShell scripts over OpenSSH for Windows servers), and draws a
+draw.io diagram of how they connect.
 It runs as a single AWX job (or `ansible-playbook` by hand) and needs nothing
 beyond Ansible and a base Python 3.9+ install: no NAPALM, no Ansible
 collections, no PyYAML, nothing to `pip install`, and no compiler.
@@ -21,8 +22,8 @@ The diagram is built in two parts:
   share when nothing says how they're cabled. Links are routed around the
   nodes so they never overlap, and each end is labelled with its interface,
   coloured green or red by link status.
-- **Feature layers.** Everything else (IPsec tunnels, VLANs and firewall
-  zones today; VRFs and so on later) is drawn by an independent feature plugin
+- **Feature layers.** Everything else (IPsec tunnels, VLANs, firewall
+  zones and server roles today; VRFs and so on later) is drawn by an independent feature plugin
   onto its own draw.io layer. Each layer can be shown or hidden in draw.io
   (**View > Layers**, or Ctrl+Shift+L), so a viewer turns on only what's
   relevant to them.
@@ -52,12 +53,13 @@ Contents:
 | `docs/design-archive/` | Design documents, one dated folder per revision |
 | `CLAUDE.md` | Standing rules for anyone (or any assistant) changing the code |
 | `scripts/collect.py` | Logs in to one device and saves its show-command output as JSON |
-| `scripts/sshcli.py` | Interactive SSH session driver (system `ssh` client + a pseudo-terminal) |
+| `scripts/sshcli.py` | Interactive SSH session driver (system `ssh` client + a pseudo-terminal), and the PowerShell-over-OpenSSH session for Windows |
 | `scripts/xmlapi.py` | PAN-OS XML API session (HTTPS, direct or through Panorama) with the same read-only guard |
 | `scripts/commands.py` | Works out which show commands to run on a device |
 | `scripts/readonly.py` | The read-only command policy every command must pass before it is sent |
 | `scripts/audit.py` | Re-checks the commands recorded for every device after collection |
-| `scripts/drivers/` | Platform drivers: turn each platform's output into the common device record (schema 2), one module per platform (`ios.py`, `panos.py`), plus shared MAC and interface-name helpers (`common.py`) |
+| `scripts/drivers/` | Platform drivers: turn each platform's output into the common device record (schema 2), one module per platform (`ios.py`, `panos.py`, `windows.py`), plus shared MAC and interface-name helpers (`common.py`) |
+| `scripts/drivers/powershell/` | The fixed PowerShell scripts run on Windows servers, each checked by the read-only policy before it is sent |
 | `scripts/main.py` | Entry point for building the diagram |
 | `scripts/parser.py` | Loads the JSON files as schema 2 records |
 | `scripts/links.py` | Works out the links from LLDP/CDP, MAC tables and shared subnets |
@@ -66,7 +68,7 @@ Contents:
 | `scripts/csrc/_hanan.c`, `scripts/_hanan.abi3.so`, `scripts/build_ext.py` | The A* search in C, its prebuilt binary, and its build script |
 | `scripts/renderer.py` | Writes nodes, links and interface labels as draw.io XML |
 | `scripts/icon_library.py` | Reads the icon library so nodes can show device pictures |
-| `scripts/features/` | Feature plugins (`ipsec.py`, `vlans.py`, `zones.py`) and their shared helpers (`bundling.py`, `porttags.py`) |
+| `scripts/features/` | Feature plugins (`ipsec.py`, `vlans.py`, `zones.py`, `roles.py`) and their shared helpers (`bundling.py`, `porttags.py`) |
 | `scripts/inventory.py`, `scripts/miniyaml.py` | Inventory reader and the small YAML parser it uses |
 | `scripts/config.py` | All tunable settings |
 | `tests/` | Unit and end-to-end tests with fixture device output |
@@ -84,7 +86,7 @@ all:
       hosts:
         core-rtr1:
           ansible_host: 10.0.0.1
-          ansible_network_os: ios     # ios / iosxe, or panos (below)
+          ansible_network_os: ios     # ios / iosxe, or panos / windows (below)
           icon: "ASR1004 Front"       # optional: a title from docs/Prod_Library.xml
           w: 230                      # optional node size
           h: 42
@@ -100,6 +102,12 @@ all:
               panos_via_panorama: true
               panorama_host: 10.1.1.10
               panos_serial: "007951000123456"
+        windows_servers:
+          vars:
+            ansible_network_os: windows
+          hosts:
+            srv-win1:
+              ansible_host: 10.0.10.21
     artifact_server:
       hosts:
         diagram-host:
@@ -122,6 +130,22 @@ Palo Alto firewalls are collected over the PAN-OS XML API on port 443
 
 A firewall's inventory name is what it's called on the diagram, and what
 Panorama is asked for when `panos_serial` isn't set, so use its hostname.
+
+Windows servers are collected over SSH on port 22 (`ansible_port`
+overrides it), which needs the OpenSSH server turned on. On Windows Server
+2022 it ships as an optional feature. As an administrator, in PowerShell:
+
+```powershell
+Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+Set-Service -Name sshd -StartupType Automatic
+Start-Service sshd
+```
+
+The installer opens TCP 22 in the Windows firewall. The default shell over
+SSH can stay `cmd.exe`: the collector starts `powershell` itself. Servers
+don't usually run LLDP, so they're placed on the diagram by finding their
+NIC's MAC address in the switches' MAC tables. Collect the switches they
+plug into in the same job.
 
 ### Credentials
 
@@ -146,6 +170,30 @@ credential. The username and password are only ever sent once per host,
 in the body of the API's `type=keygen` login request. The API key it
 returns is kept in memory and sent in the body of each later request,
 never in a URL, the log or the facts file.
+
+Windows servers likewise use the same credentials unless
+`WINDOWS_USERNAME` and `WINDOWS_PASSWORD` are set, from a second custom
+credential type built the same way. Use a domain account written
+`DOMAIN\user` (or `user@domain`) or a local account. It doesn't need to be
+an administrator for the network data; see the limitations for the roles
+list. The password is typed only at the SSH password prompt, through the
+pseudo-terminal, never on a command line.
+
+A custom credential type for Windows, for example:
+
+```yaml
+# Input configuration
+fields:
+  - {id: username, type: string, label: Username}
+  - {id: password, type: string, label: Password, secret: true}
+required: [username, password]
+# Injector configuration
+env:
+  WINDOWS_USERNAME: "{{ username }}"
+  WINDOWS_PASSWORD: "{{ password }}"
+```
+
+The Palo Alto type is the same with `PANOS_USERNAME` and `PANOS_PASSWORD`.
 
 ### SSH options
 
@@ -174,8 +222,8 @@ be refused, the job stops here, before any device is contacted.
 **Play 2: collect (every host in `network_devices`).**
 Ansible doesn't connect to the devices itself (`connection: local`). For each
 device, Ansible's normal forks run `scripts/collect.py` on the controller.
-For a Cisco device it does the following (a Palo Alto firewall is described
-after the list):
+For a Cisco device it does the following (Palo Alto firewalls and Windows
+servers are described after the list):
 
 1. It checks that a username and password were found. If not, the play fails
    with a message telling you to attach the Network credential.
@@ -226,6 +274,34 @@ the same checks:
    `show lldp neighbors all` and, for the IPsec layer, `show vpn flow`.
 4. The PAN-OS driver parses the XML responses, and the facts file is
    written the same way, with the raw XML kept under `raw`.
+
+For a Windows server, `collect.py` runs fixed PowerShell scripts over
+OpenSSH (`PowerShellSession` in `sshcli.py`). Nothing is ever typed into a
+shell on the server:
+
+1. Each command is the name of a script in `scripts/drivers/powershell/`:
+   `powershell:windows_core.ps1` for the network data, and
+   `powershell:windows_roles.ps1` for the server roles layer. The read-only
+   policy reads the script from the repository and checks every command in
+   it before anything connects (see [Read-only collection](#read-only-collection)).
+2. For each script it opens one SSH connection that runs
+   `powershell -NoProfile -NonInteractive -EncodedCommand <base64>`, with
+   exactly the text that was checked, encoded. The password is answered at
+   the SSH prompt, and the script's output is read until the connection
+   closes.
+3. The core script reads the computer, OS and BIOS (`Get-CimInstance`), the
+   NICs (`Get-NetAdapter`), their addresses (`Get-NetIPAddress`), the ARP
+   cache (`Get-NetNeighbor`) and NIC teams (`Get-NetLbfoTeam`), and prints
+   them as one JSON document. The roles script lists the installed roles
+   (`Get-WindowsFeature`).
+4. The audit records each script by name and SHA-256
+   (`powershell:windows_core.ps1#sha256=...`), so it says exactly which
+   text ran. There's no configuration-change marker on Windows, so the
+   check is recorded as `unsupported`; the fixed, checked scripts are the
+   guard.
+5. The Windows driver parses the JSON. A NIC team becomes an interface of
+   kind `lag` with its NICs as members, loopback and link-local (APIPA)
+   addresses are left out, and the device's role is `server`.
 
 Collection is the only step that talks to the devices. Everything after it,
 features included, works from these JSON files.
@@ -289,6 +365,9 @@ by the feature that draws it. **raw** keeps exactly what was collected.
 - On PAN-OS, `vrf` is the interface's virtual router, `admin_up` and `mtu`
   are `null` (the API doesn't report them), and `raw` is keyed by the XML
   API request.
+- On Windows, interfaces are named by their NIC alias (`Ethernet0`,
+  `Team1`), `raw` is keyed by script (`powershell:windows_core.ps1`) and
+  holds the JSON it printed, and `neighbors` is empty.
 - Older files are upgraded when they are read: the earlier raw format
   (`"cli": {...}`) is parsed with the current driver, and the NAPALM-based
   format is converted. A file with a newer schema number than the code
@@ -330,14 +409,16 @@ left to the command lists. The full design is in
 | Allowlist per platform | `scripts/readonly.py` | On IOS, only `show ...` with display filters after a pipe (`include`, `exclude`, `begin`, `section`, `count`), plus `terminal length 0`, `terminal width N` and `terminal datadump`, which affect only the current session. `show ... \| redirect`, `tee` and `append` are refused, because they write files. |
 | PAN-OS request policy | `scripts/readonly.py` (`XmlApiPolicy`) | XML API requests are checked by their parameters. `type=op` is allowed only when `cmd` is a single XML element tree whose root is `<show>`, with no DTD, entities, comments or processing instructions. `type=config` is allowed only with `action=get` or `action=show` under `/config`. `type=keygen` is allowed only as the login, once, first. `target=<serial>` is the only other parameter. Every other type (`commit`, `import`, `export`, `user-id` and so on), every other config action (`set`, `edit`, `delete`, `move` and so on) and any repeated parameter is refused. The client sends exactly the parameters the policy checked. |
 | Denylist of state-changing verbs | `scripts/readonly.py` | A command starting with, or abbreviating, a verb such as `configure`, `write`, `copy`, `reload`, `delete`, `erase`, `clear`, `debug`, `set`, `commit`, `request` or a PowerShell `Set-`/`New-`/`Remove-` verb is refused, even if an allowlist entry were wrong. |
+| PowerShell script policy | `scripts/readonly.py` (`PowerShellPolicy`) | On Windows, a command can only name one of the fixed scripts in `scripts/drivers/powershell/`. The policy reads that script and checks it token by token: every command in it must be one of a short list of read-only cmdlets (`Get-CimInstance`, `Get-NetAdapter`, `Get-NetIPAddress`, `Get-NetNeighbor`, `Get-NetLbfoTeam`, `Get-NetLbfoTeamMember`, `Get-WindowsFeature`) or the formatting cmdlets (`Select-Object`, `Where-Object`, `ForEach-Object`, `Sort-Object`, `ConvertTo-Json`). It refuses the call operator `&`, dot-sourcing, method calls, static members (`::`), type literals other than `[ordered]` and `[pscustomobject]`, double-quoted strings (which can run code), subexpressions, redirection, backticks and assignment to an object's property. The session sends exactly the text that was checked, as `-EncodedCommand`, and records its SHA-256; a recorded hash that no longer matches the script is refused. |
 | Character check | `scripts/readonly.py` | Newlines, control characters, tabs and `?` are refused, so nothing can smuggle a second command onto the line. |
 | Fail closed | `scripts/readonly.py`, `collect.py` | A platform without a policy is never contacted. |
-| Enforced at the lowest layer | `scripts/sshcli.py`, `scripts/xmlapi.py` | `CliSession.run()` and `ApiSession.run()` refuse to send anything the policy doesn't allow, and a session with no policy sends nothing. The only other input ever typed over SSH is the login answers, `enable` and `exit`; over the API, the one login request. Plain http is refused except to localhost (the tests' fake API). |
+| Enforced at the lowest layer | `scripts/sshcli.py`, `scripts/xmlapi.py` | `CliSession.run()`, `PowerShellSession.run()` and `ApiSession.run()` refuse to send anything the policy doesn't allow, and a session with no policy sends nothing. The only other input ever typed over SSH is the login answers, `enable` and `exit`; over the API, the one login request. A Windows server gets only the
+password, at the SSH prompt. Plain http is refused except to localhost (the tests' fake API). |
 | Confirmations are never answered | `scripts/sshcli.py` | If a device asks `[confirm]`, `[yes/no]`, `(y/n)` or `...]?`, the session sends Ctrl-C, stops using the session and fails the host. A command that times out is also cancelled with Ctrl-C before anything else is sent. |
 | Plan before connecting | `collect.py --plan`, play 1 | Prints every command per platform and stops the job if any would be refused. |
 | Audit trail | `sshcli.py`, `collect.py` | Every line sent is printed in the job log and stored with a timestamp and outcome in the facts file. |
-| Configuration-change check | `collect.py`, `drivers/ios.py`, `drivers/panos.py` | A marker is read before and after collection: the `Last configuration change` line on IOS, and the newest commit job from `show jobs all` on PAN-OS (a commit is the only way a firewall's running configuration changes). If it moved, the host fails loudly. If it can't be read (for example, an IOS account below privilege 15), a warning says so. |
-| Verification after the run | `scripts/audit.py`, play 6 | Re-checks every recorded command or request and the configuration check, checks an API login came first, and fails the job on any problem. |
+| Configuration-change check | `collect.py`, `drivers/ios.py`, `drivers/panos.py` | A marker is read before and after collection: the `Last configuration change` line on IOS, and the newest commit job from `show jobs all` on PAN-OS (a commit is the only way a firewall's running configuration changes). If it moved, the host fails loudly. If it can't be read (for example, an IOS account below privilege 15), a warning says so. Windows has no such marker, so the check is recorded as `unsupported` there. |
+| Verification after the run | `scripts/audit.py`, play 6 | Re-checks every recorded command or request and the configuration check, checks an API login came first, and fails the job on any problem. For Windows it re-checks the script with the recorded SHA-256, so the audit fails if the script that ran isn't the one in the repository. |
 | Command inventory test | `tests/test_readonly.py` | Checks every command any driver or feature can emit, enabled or not, against its platform's policy, and checks a list of dangerous commands is refused. A new command that isn't read-only fails the tests. |
 
 To see what would be sent without contacting anything:
@@ -345,6 +426,7 @@ To see what would be sent without contacting anything:
 ```bash
 python3 scripts/collect.py --plan --platform ios
 python3 scripts/collect.py --plan --platform panos
+python3 scripts/collect.py --plan --platform windows
 ```
 
 The strongest guarantee is on the device side, and is recommended in
@@ -370,7 +452,8 @@ audit.
      enough), management address or MAC.
    - **`mac`.** If a device's interface MAC is learned on a switch port,
      the device hangs off that port. This is how servers and firewalls that
-     don't run LLDP get placed. Uplinks are ignored: ports whose neighbor is
+     don't run LLDP get placed. A Windows NIC team's MAC is the team's, so a
+     teamed server is linked once, to its team. Uplinks are ignored: ports whose neighbor is
      another switch, and ports that carry the MACs of more than one
      inventory device (an unmanaged switch, say). If a device's MAC is on
      several access ports, the port with the fewest MACs wins, and a tie
@@ -651,6 +734,26 @@ VLANs and zones both tag link ends, and share the code for it in
 `features/porttags.py`: a feature that labels ports only has to say what
 each port's label is.
 
+#### Server roles (`features/roles.py`)
+
+**Layer:** "Server roles". **Facet:** `server`, supplied on Windows from
+`Get-WindowsFeature` (the `windows_roles.ps1` script).
+
+What it shows: a small badge under each server listing the roles it runs,
+such as `AD DS · DNS`. Hovering the badge shows every installed role by its
+full name, and the server's domain. Only well-known roles get a short name
+on the badge; a server with none of them gets a badge reading `roles`, with
+the full list in its tooltip.
+
+```json
+"facets": {"server": {"domain": "lab.local",
+                      "roles": [{"name": "AD-Domain-Services",
+                                 "display_name": "Active Directory Domain Services"}]}}
+```
+
+Settings (`config.FEATURE_SETTINGS["roles"]`): `badges` (role name to short
+label), `separator`, `style` and `gap` (the space below the node).
+
 #### Adding a feature
 
 1. Decide the facet's shape: the vendor-neutral data the feature needs,
@@ -675,12 +778,13 @@ Device platforms are separate from features. All of a platform's vendor
 knowledge lives in one driver module. To add one (NX-OS, PAN-OS, Windows
 and so on):
 
-1. Write `scripts/drivers/<platform>.py` with `TRANSPORT` (`ssh-cli` or
-   `xml-api`), `VENDOR`, `CORE_COMMANDS`, optionally `PAGING_COMMANDS`,
+1. Write `scripts/drivers/<platform>.py` with `TRANSPORT` (`ssh-cli`,
+   `xml-api` or `powershell-ssh`), `VENDOR`, `CORE_COMMANDS`, optionally `PAGING_COMMANDS`,
    `CONFIG_CHECK_COMMAND` and `config_marker(output)`, `FACET_COMMANDS`,
    `parse_core(raw)` (returning `device`, `interfaces`, `neighbors`, `arp`
    and `mac_table` in the shape above) and `parse_facets(raw)`. `ios.py`
-   (a CLI) and `panos.py` (an API) are the examples.
+   (a CLI), `panos.py` (an API) and `windows.py` (scripts) are the
+   examples.
 2. Register it in `_DRIVERS` and `_ALIASES` in `scripts/drivers/__init__.py`.
 3. Add a read-only policy for it to `scripts/readonly.py`, and allowed and
    refused examples to `tests/test_readonly.py`. Without a policy, the
@@ -708,7 +812,7 @@ All settings live in `scripts/config.py`:
 | `STATUS_UP_COLOR`, `STATUS_DOWN_COLOR` | Interface label colours |
 | `INTF_LABEL_STYLE`, `INTF_ABBREVIATIONS` | Interface label style and name abbreviations |
 | `ENABLED_FEATURES` | Features to run, in layer order |
-| `FEATURE_SETTINGS` | Per-feature overrides, such as `{"ipsec": {"up_color": "#0050EF"}}`, `{"vlans": {"offset": 50}}` or `{"zones": {"colors": {"dmz": "#FFE6CC"}}}` |
+| `FEATURE_SETTINGS` | Per-feature overrides, such as `{"ipsec": {"up_color": "#0050EF"}}`, `{"vlans": {"offset": 50}}` or `{"zones": {"colors": {"dmz": "#FFE6CC"}}}` or `{"roles": {"badges": {"Hyper-V": "HV"}}}` |
 
 `main.py` also takes these on the command line:
 
@@ -723,7 +827,8 @@ before drawing.
 
 **In AWX:** create a job template for `playbooks/gather_topology.yml` with
 the project's `inventory.yml` as its inventory, and attach a Network
-credential. When the job finishes, the diagram is at the path on the
+credential (plus the Palo Alto and Windows credentials, if those use their
+own accounts). When the job finishes, the diagram is at the path on the
 artifact server that the last play copies it to, and the raw JSON is
 alongside it under `output/facts/`. The stock AWX execution environment is
 enough, since everything the job needs is standard Python and the OpenSSH
@@ -790,8 +895,13 @@ byte-identical diagram), link inference (segments and VRF reuse), the
 layer 2 parsers, links from LLDP/CDP and MAC table evidence, port-channel
 collapse and the VLANs layer, the PAN-OS driver, XML API sessions
 (directly, through Panorama, and over HTTPS with certificate checks),
-the zones layer, a mixed Cisco and Palo Alto diagram, and the read-only
-safeguards, for both the SSH and the API policies. The fake `ssh` logs every line it
+the zones layer, a mixed Cisco and Palo Alto diagram, the Windows driver,
+PowerShell session and roles layer, a teamed server placed by a switch's
+MAC table, and the read-only safeguards, for the SSH, API and PowerShell
+policies. `tests/fixtures/windows/` holds a Windows server's script output,
+which `tests/fake_winssh.py` serves as a fake OpenSSH server: it decodes
+the script it is sent and logs it, so the tests check that the server
+received exactly the script the policy checked. The fake `ssh` logs every line it
 receives, so the read-only tests compare what the "device" got with the
 audit record, and check that refused commands never reach it, that a
 confirmation prompt is cancelled rather than answered, and that a
@@ -801,13 +911,12 @@ configuration change fails the host.
 
 ### Current limitations
 
-- Cisco IOS / IOS-XE and Palo Alto PAN-OS are supported today. The
-  collector refuses to contact a device on any other platform, because
-  there is no read-only policy for it yet. Windows Server (PowerShell over
-  OpenSSH) is planned in the
-  [multi-vendor design](docs/design-archive/2026-10-26/multi-vendor-device-data-design.md).
-- The PAN-OS parsers are written against the documented XML API output and
-  tested with fixtures, not yet against the lab firewall. If a field turns
+- Cisco IOS / IOS-XE, Palo Alto PAN-OS and Windows Server (PowerShell over
+  OpenSSH) are supported today. The collector refuses to contact a device
+  on any other platform, because there is no read-only policy for it yet.
+- The PAN-OS and Windows parsers are written against the documented
+  output and tested with fixtures, not yet against the lab firewall and
+  server. If a field turns
   out to be named differently, the raw XML is kept, so after the parser is
   fixed `main.py --reparse` corrects existing files without collecting
   again.
@@ -823,9 +932,16 @@ configuration change fails the host.
   learned, and that has only unnumbered or IPv6 interfaces won't connect to
   anything.
 - MAC table evidence needs the device's interface MAC in its own record.
-  Servers and firewalls get that from their drivers in phases 3 and 4;
-  until then a server can be placed by its LLDP advertisement, or by a
-  hand-written schema 2 facts file.
+  Cisco, Palo Alto and Windows devices have it; any other server can be
+  placed by its LLDP advertisement, or by a hand-written schema 2 facts
+  file.
+- On Windows, `Get-WindowsFeature` may need an administrator account. If
+  the account can't run it, the roles list comes back empty and that host
+  has no roles badge. The network data is still collected. Switch Embedded Teaming
+  (Hyper-V `SET` switches) isn't read, only LBFO NIC teams, so a SET
+  team's NICs appear as separate interfaces. Windows' command line is
+  limited to 8,191 characters, which caps the size of each script (the
+  tests check they fit).
 - `show ip arp` reads the global table only, so ARP entries in other VRFs
   aren't collected. ARP doesn't draw links, so this only affects what's in
   the facts files.
@@ -833,8 +949,6 @@ configuration change fails the host.
   switch port, so the "more than one inventory device on the port" rule
   leaves them to subnet evidence.
 - The IPsec path is the fewest-hops guess unless an explicit path is given.
-- Windows will use PowerShell over OpenSSH, as described in the
-  multi-vendor design.
 
 ### Scaling to hundreds of devices
 

@@ -116,7 +116,7 @@ BLANK_LABEL = "\u200b"
 # on top of the physical diagram. Order here = layer stacking order.
 # None enables every feature module found.
 # ---------------------------------------------------------------------------
-ENABLED_FEATURES = ["ipsec", "vlans", "zones"]
+ENABLED_FEATURES = ["ipsec", "vlans", "zones", "roles"]
 
 # Per-feature overrides of each feature's SETTINGS defaults, e.g.
 #   FEATURE_SETTINGS = {"ipsec": {"up_color": "#0050EF", "lane_spacing": 12}}

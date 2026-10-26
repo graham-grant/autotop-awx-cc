@@ -81,7 +81,7 @@ class FeatureIsolationTest(unittest.TestCase):
     def test_discovery_and_commands(self):
         import commands
         self.assertIn("ipsec", features.discover())
-        self.assertEqual(features.facets_enabled(), ["ipsec", "vlans", "zones"])
+        self.assertEqual(features.facets_enabled(), ["ipsec", "vlans", "zones", "server"])
         self.assertIn("show crypto session detail", commands.commands("ios"))
         self.assertEqual(commands.commands("junos"), [])
 

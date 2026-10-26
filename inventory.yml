@@ -27,6 +27,14 @@ all:
       #         panos_via_panorama: true
       #         panorama_host: 10.1.1.10
       #         panos_serial: "007951000123456"      # optional: looked up by name
+      #   # Windows servers run fixed PowerShell scripts over OpenSSH (see
+      #   # the README for enabling the OpenSSH server):
+      #   windows_servers:
+      #     vars:
+      #       ansible_network_os: windows
+      #     hosts:
+      #       srv-win1:
+      #         ansible_host: 192.168.10.21
     artifact_server:
       hosts:
         diagram-host:

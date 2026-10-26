@@ -362,3 +362,151 @@ class CliSession:
 
     def __exit__(self, *exc):
         self.close()
+
+
+class PowerShellSession(CliSession):
+    """Runs fixed PowerShell scripts on a Windows server over OpenSSH, one
+    SSH connection per script, standard library only:
+
+        with PowerShellSession(host, username, password,
+                               policy=readonly.policy_for("windows")) as s:
+            text = s.run("powershell:windows_core.ps1")
+
+    run() checks the named script with the policy (readonly.PowerShellPolicy
+    reads and checks the file), then sends exactly that text as
+    `powershell -NoProfile -NonInteractive -EncodedCommand <base64>`, so
+    what runs is what was checked. The audit records the script's name and
+    SHA-256. The password is answered at ssh's prompt through the pty, as
+    for CliSession, and nothing is ever typed after it: the script's output
+    is read until the connection closes. Scripts print their JSON between
+    AUTOTOP-BEGIN and AUTOTOP-END lines, and only that part is returned.
+    """
+
+    BEGIN, END = "AUTOTOP-BEGIN", "AUTOTOP-END"
+
+    def __init__(self, *args, **kw):
+        super().__init__(*args, **kw)
+        self._remote = None
+        self._open = False
+
+    def _spawn(self):
+        if not shutil.which(self.ssh_binary):
+            raise CliError(f"'{self.ssh_binary}' not found - install the OpenSSH client")
+        argv = [
+            self.ssh_binary, "-T",
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+            "-o", "LogLevel=ERROR",
+            "-o", "PubkeyAuthentication=no",
+            "-o", "PreferredAuthentications=keyboard-interactive,password",
+            "-o", "NumberOfPasswordPrompts=1",
+            "-o", f"ConnectTimeout={int(self.timeout)}",
+            "-p", str(self.port),
+            "-l", self.username,
+            *self.ssh_args,
+            self.host, *self._remote,
+        ]
+        pid, fd = pty.fork()
+        if pid == 0:  # child
+            try:
+                os.execvp(argv[0], argv)
+            finally:
+                os._exit(127)
+        self.pid, self.fd = pid, fd
+
+    def open(self):
+        """Nothing to do until the first script: each one is its own
+        connection."""
+        self._open = True
+        return self
+
+    def run(self, command: str, timeout: float | None = None, kind: str = "collect") -> str:
+        import base64
+        import hashlib
+
+        if not self._open:
+            raise CliError("session not open")
+        if self.policy is None or not hasattr(self.policy, "script"):
+            self._record(command, kind, "refused")
+            raise readonly.CommandRefused(f"{self.host}: no PowerShell read-only policy for "
+                                          f"this session, not sending {command!r}")
+        try:
+            script = self.policy.script(command)
+        except readonly.CommandRefused:
+            self._record(command, kind, "refused")
+            raise
+        digest = hashlib.sha256(script.encode("utf-8")).hexdigest()
+        encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+        self._remote = ["powershell", "-NoProfile", "-NonInteractive",
+                        "-EncodedCommand", encoded]
+        entry = self._record(f"{command.split('#')[0]}#sha256={digest}", kind, "sent")
+        self.transcript = bytearray()
+        self.log(f"   (script sha256 {digest}, {len(encoded)} characters encoded)")
+        self._spawn()
+        try:
+            output = self._read_until_closed(timeout or self.command_timeout)
+        except CliError:
+            entry["status"] = "error"
+            raise
+        finally:
+            self._reap()
+        text = _ANSI.sub(b"", output).decode("utf-8", "replace").replace("\r\n", "\n")
+        start, end = text.find(self.BEGIN), text.rfind(self.END)
+        if start < 0 or end < start:
+            entry["status"] = "error"
+            if _AUTH_FAILED.search(output):
+                raise AuthError(f"{self.host}: login rejected\n{self._tail()}")
+            raise CliError(f"{self.host}: {command} produced no result\n{self._tail()}")
+        entry["status"] = "ok"
+        return text[start + len(self.BEGIN):end].strip()
+
+    def _read_until_closed(self, timeout: float) -> bytes:
+        deadline = time.monotonic() + max(timeout, self.timeout)
+        login_deadline = time.monotonic() + self.timeout
+        buf, out = b"", b""
+        answered = False
+        while True:
+            now = time.monotonic()
+            if now > deadline or (not answered and now > login_deadline):
+                raise CliError(f"{self.host}: timed out\n{self._tail()}")
+            try:
+                data = self._read_some(deadline)
+            except CliError:
+                return out  # connection closed: the script has finished
+            if not data:
+                continue
+            out += data
+            if answered:
+                continue
+            buf += data
+            clean = _ANSI.sub(b"", buf).rstrip(b" ")
+            if _AUTH_FAILED.search(clean):
+                raise AuthError(f"{self.host}: login rejected\n{self._tail()}")
+            if _PASS_PROMPT.search(clean):
+                self._send(self.password)
+                answered = True
+
+    def _reap(self):
+        if self.fd is not None:
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
+            self.fd = None
+        if self.pid:
+            try:
+                os.kill(self.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                os.waitpid(self.pid, 0)
+            except ChildProcessError:
+                pass
+            self.pid = None
+
+    def disable_paging(self, commands):
+        """Nothing to do: scripts don't page."""
+
+    def close(self):
+        self._open = False
+        self._reap()
