@@ -84,6 +84,17 @@ INTF_ABBREVIATIONS = [
 ]
 
 # ---------------------------------------------------------------------------
+# Link evidence (see links.py): which kinds of evidence may draw a link.
+#   lldp, cdp  neighbor protocols - the exact cable
+#   mac        a device's MAC learned on a switch access port (drawn dashed,
+#              since it's inferred)
+#   subnet     two or more devices with an address in the same subnet
+# Remove "mac" to hide inferred server links, for example.
+# ---------------------------------------------------------------------------
+LINK_EVIDENCE = ("lldp", "cdp", "mac", "subnet")
+INFERRED_LINK_STYLE = "dashed=1;dashPattern=4 4;"
+
+# ---------------------------------------------------------------------------
 # Shared segments: a subnet with three or more inventory members is drawn as
 # a small node of its own, linked to each member, instead of a full mesh.
 # Its position can be pinned in template.drawio like any node (its label
@@ -104,7 +115,7 @@ BLANK_LABEL = "\u200b"
 # on top of the physical diagram. Order here = layer stacking order.
 # None enables every feature module found.
 # ---------------------------------------------------------------------------
-ENABLED_FEATURES = ["ipsec"]
+ENABLED_FEATURES = ["ipsec", "vlans"]
 
 # Per-feature overrides of each feature's SETTINGS defaults, e.g.
 #   FEATURE_SETTINGS = {"ipsec": {"up_color": "#0050EF", "lane_spacing": 12}}

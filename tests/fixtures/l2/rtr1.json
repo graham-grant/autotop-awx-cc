@@ -1,0 +1,12 @@
+{
+  "inventory_name": "rtr1",
+  "platform": "ios",
+  "cli": {
+    "show version": "Cisco IOS XE Software, Version 17.18.02\nrtr1 uptime is 2 days, 3 hours\ncisco C8000V (VXE) processor (revision VXE) with 1651587K/3075K bytes of memory.\nProcessor board ID 9ABCD1234EF\n",
+    "show interfaces": "GigabitEthernet1 is up, line protocol is up (connected)\n  Hardware is Gigabit Ethernet, address is 5254.00aa.0001 (bia 5254.00aa.0001)\n  Description: to sw1\n  MTU 1500 bytes, BW 1000000 Kbit/sec, DLY 10 usec,\n",
+    "show ip interface": "GigabitEthernet1 is up, line protocol is up\n  Internet address is 10.0.10.1/24\n  Broadcast address is 255.255.255.255\n",
+    "show lldp neighbors detail": "% LLDP is not enabled\n",
+    "show cdp neighbors detail": "-------------------------\nDevice ID: sw1.lab.local\nEntry address(es): \n  IP address: 10.0.10.2\nPlatform: cisco C9300-24T,  Capabilities: Switch IGMP\nInterface: GigabitEthernet1,  Port ID (outgoing port): GigabitEthernet1/0/1\nHoldtime : 143 sec\n\nVersion :\nCisco IOS Software\n\nadvertisement version: 2\nDuplex: full\nManagement address(es): \n  IP address: 10.0.10.2\n\n\nTotal cdp entries displayed : 1\n",
+    "show ip arp": "Protocol  Address          Age (min)  Hardware Addr   Type   Interface\nInternet  10.0.10.1               -   5254.00aa.0001  ARPA   GigabitEthernet1\nInternet  10.0.10.11             12   0050.5601.0011  ARPA   GigabitEthernet1\nInternet  10.0.10.12              4   0050.5601.0012  ARPA   GigabitEthernet1\n"
+  }
+}
