@@ -130,7 +130,7 @@ def discover() -> dict[str, Feature]:
     skipped, not fatal."""
     found = {}
     for mod in pkgutil.iter_modules(__path__):
-        if mod.name.startswith("_") or mod.name in ("context", "bundling"):
+        if mod.name.startswith("_") or mod.name in ("context", "bundling", "porttags"):
             continue
         try:
             module = importlib.import_module(f"{__name__}.{mod.name}")

@@ -1,13 +1,14 @@
 ---
-# Gathers raw show-command output from every host in the `network_devices`
-# group over SSH (scripts/collect.py - stdlib Python + the system ssh
-# client; no NAPALM, no network collections, nothing to pip install), then
-# writes one JSON file per host to output/facts/: the common device format
-# (schema 2), parsed by the platform's driver (scripts/drivers/), with the
-# raw output kept. scripts/main.py reads those files and draws the drawio
-# diagram. Adjacency is derived from directly-connected subnets (two
-# hosts with an IP in the same subnet are linked), not LLDP - see
-# scripts/parser.py for why.
+# Gathers show-command output from every host in the `network_devices`
+# group (scripts/collect.py - stdlib Python only; no NAPALM, no network
+# collections, nothing to pip install): over SSH with the system ssh client
+# for Cisco, and over the PAN-OS XML API (HTTPS) for Palo Alto firewalls,
+# directly or through Panorama. It writes one JSON file per host to
+# output/facts/: the common device format (schema 2), parsed by the
+# platform's driver (scripts/drivers/), with the raw output kept.
+# scripts/main.py reads those files and draws the drawio diagram, with
+# links found from LLDP/CDP, MAC tables and shared subnets (see
+# scripts/links.py).
 #
 # Which commands get run is decided by scripts/commands.py: the core
 # commands the platform's driver needs, plus the commands behind each facet
@@ -88,20 +89,28 @@
         quiet: true
       run_once: true
 
-    - name: Collect show-command output over SSH
+    # SSH for Cisco, the XML API for PAN-OS (the driver decides). The
+    # panos_* variables only apply to firewalls: see inventory.yml.
+    - name: Collect show-command output
       command: >-
         python3 {{ playbook_dir }}/../scripts/collect.py
         --name {{ inventory_hostname }}
         --host {{ ansible_host | default(inventory_hostname) }}
-        --port {{ ansible_port | default(22) }}
+        {{ ('--port ' ~ ansible_port) if ansible_port is defined else '' }}
         --platform {{ ansible_network_os }}
         --out {{ playbook_dir }}/../output/facts/{{ inventory_hostname }}.json
         --ssh-args {{ net_ssh_args | default('') | quote }}
+        {{ ('--panorama ' ~ panorama_host) if (panos_via_panorama | default(false) | bool) else '' }}
+        {{ ('--serial ' ~ panos_serial) if (panos_via_panorama | default(false) | bool) and panos_serial is defined else '' }}
+        {{ ('--ca-file ' ~ (panos_ca_file | quote)) if panos_ca_file is defined else '' }}
+        {{ '--no-verify-tls' if not (panos_verify_tls | default(true) | bool) else '' }}
       # Credentials go to collect.py through the environment, never argv.
       environment:
         NET_USERNAME: "{{ net_username }}"
         NET_PASSWORD: "{{ net_password }}"
         NET_ENABLE_PASSWORD: "{{ net_enable_password }}"
+        PANOS_USERNAME: "{{ panos_username }}"
+        PANOS_PASSWORD: "{{ panos_password }}"
       register: collect_result
       changed_when: false
 

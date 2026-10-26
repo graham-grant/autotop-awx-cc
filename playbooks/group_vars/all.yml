@@ -13,3 +13,10 @@
 net_username: "{{ lookup('env', 'NET_USERNAME') or lookup('env', 'ANSIBLE_NET_USERNAME') or lookup('env', 'NAPALM_USERNAME') }}"
 net_password: "{{ lookup('env', 'NET_PASSWORD') or lookup('env', 'ANSIBLE_NET_PASSWORD') or lookup('env', 'NAPALM_PASSWORD') }}"
 net_enable_password: "{{ lookup('env', 'NET_ENABLE_PASSWORD') or lookup('env', 'ANSIBLE_NET_AUTH_PASS') }}"
+
+# Optional: a separate (read-only) account for Palo Alto firewalls and
+# Panorama. Unset, firewalls use the credentials above. In AWX these come
+# from a custom credential type that injects PANOS_USERNAME / PANOS_PASSWORD
+# (see the README).
+panos_username: "{{ lookup('env', 'PANOS_USERNAME') }}"
+panos_password: "{{ lookup('env', 'PANOS_PASSWORD') }}"

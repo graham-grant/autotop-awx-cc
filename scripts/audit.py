@@ -5,9 +5,10 @@ read-only, from the "audit" section collect.py writes into each facts file.
 
 For each output/facts/<host>.json it checks that:
   - the file has an audit (it was collected with the read-only safeguards);
-  - every command recorded was allowed by the platform's read-only policy
-    (re-checked here, independently of the check made when it was sent),
-    apart from the fixed session words "enable" and "exit";
+  - every command (or XML API request) recorded was allowed by the
+    platform's read-only policy (re-checked here, independently of the
+    check made when it was sent), apart from the fixed session words
+    "enable" and "exit", and an API login came first if there was one;
   - nothing was refused or cancelled;
   - the config-change marker did not move (or says why it couldn't be read).
 
@@ -39,8 +40,10 @@ def verify(record: dict) -> tuple[list[str], list[str]]:
         policy = readonly.policy_for(drivers.platform_key(_platform(record)))
     except readonly.CommandRefused as e:
         return [str(e)], warnings
-    for entry in audit.get("commands", []):
+    for i, entry in enumerate(audit.get("commands", [])):
         cmd, status = entry.get("command", ""), entry.get("status")
+        if cmd == "type=keygen" and i != 0:
+            problems.append("an API login (type=keygen) was sent after the first request")
         if entry.get("kind") == "session" and cmd in SESSION_WORDS:
             continue
         if not policy.allows(cmd):

@@ -15,6 +15,9 @@ the platform's policy allows it. Three rules, all of which must pass:
   3. characters - no control characters, newlines or other characters that
                   could smuggle a second command onto the line.
 
+PAN-OS is reached through its XML API rather than a CLI, so its policy
+(XmlApiPolicy) checks API request parameters instead; see that class.
+
 A platform without a policy gets nothing: collection refuses to connect.
 Adding a platform means adding its policy here, and the command-inventory
 test (tests/test_readonly.py) checks every command any driver or feature
@@ -132,8 +135,98 @@ def _ios_allow(command: str) -> bool:
     return all(_IOS_FILTER.fullmatch(f) for f in filters)
 
 
+class XmlApiPolicy:
+    """The PAN-OS XML API policy. A request is a query string of the API's
+    parameters (the API key and keygen credentials are added by the client
+    after the check, and are never part of it):
+
+        type=op&cmd=<show><system><info></info></system></show>
+        type=config&action=get&xpath=/config/devices
+        type=keygen
+
+      - type=op only with a cmd that is one XML element tree whose root is
+        <show>, with no DTD, entities, processing instructions or comments;
+      - type=config only with action=get or action=show and an xpath under
+        /config;
+      - type=keygen alone (the client sends it once, first, to log in);
+      - target=<serial> (through Panorama) is the only other parameter, and
+        is allowed on op and config requests;
+      - any other type (commit, import, export, user-id, report, log, ...)
+        or action (set, edit, delete, rename, move, clone, override,
+        multi-move, ...) is refused, as is a repeated parameter.
+    """
+
+    _SERIAL = re.compile(r"[0-9A-Za-z]{1,32}")
+    _BAD = re.compile(r"[\x00-\x1f\x7f]")
+    # Markup that isn't plain elements and text: DTDs and entities could
+    # expand into something else, and none of it belongs in a show command
+    _MARKUP = re.compile(r"<[!?]|&")
+    ALLOWED_CONFIG_ACTIONS = ("get", "show")
+
+    def __init__(self, name: str):
+        self.name = name
+
+    def _refuse(self, request, why):
+        raise CommandRefused(f"{self.name}: {request!r} refused: {why}")
+
+    def check(self, request: str) -> str:
+        from urllib.parse import parse_qsl
+        import xml.etree.ElementTree as ET
+
+        if not isinstance(request, str) or not request.strip():
+            raise CommandRefused(f"{self.name}: empty request refused")
+        if self._BAD.search(request) or request != request.strip():
+            self._refuse(request, "contains a control character, newline or stray whitespace")
+        try:
+            pairs = parse_qsl(request, keep_blank_values=True, strict_parsing=True)
+        except ValueError:
+            self._refuse(request, "not a query string of API parameters")
+        keys = [k for k, _ in pairs]
+        if len(set(keys)) != len(keys):
+            self._refuse(request, "a parameter is repeated")
+        params = dict(pairs)
+        kind = params.get("type")
+        if "target" in params and not self._SERIAL.fullmatch(params["target"]):
+            self._refuse(request, "target must be a firewall serial number")
+        if kind == "keygen":
+            if keys != ["type"]:
+                self._refuse(request, "keygen takes no other parameters here")
+        elif kind == "op":
+            if set(keys) - {"type", "cmd", "target"}:
+                self._refuse(request, f"unexpected parameter(s) {sorted(set(keys) - {'type', 'cmd', 'target'})}")
+            cmd = params.get("cmd", "")
+            if self._MARKUP.search(cmd):
+                self._refuse(request, "cmd may only hold plain XML elements and text")
+            try:
+                root = ET.fromstring(cmd)
+            except ET.ParseError:
+                self._refuse(request, "cmd is not well-formed XML")
+            if root.tag != "show":
+                self._refuse(request, f"operational commands must be <show>, not <{root.tag}>")
+        elif kind == "config":
+            if set(keys) - {"type", "action", "xpath", "target"}:
+                self._refuse(request, f"unexpected parameter(s) {sorted(set(keys) - {'type', 'action', 'xpath', 'target'})}")
+            if params.get("action") not in self.ALLOWED_CONFIG_ACTIONS:
+                self._refuse(request, f"config action {params.get('action')!r} can change "
+                                      "the device; only get and show are allowed")
+            xpath = params.get("xpath", "")
+            if not (xpath == "/config" or xpath.startswith("/config/")):
+                self._refuse(request, "xpath must be under /config")
+        else:
+            self._refuse(request, f"API request type {kind!r} is not read-only")
+        return request
+
+    def allows(self, request: str) -> bool:
+        try:
+            self.check(request)
+            return True
+        except CommandRefused:
+            return False
+
+
 _POLICIES = {
     "ios": Policy("ios", _ios_allow),
+    "panos": XmlApiPolicy("panos"),
 }
 
 

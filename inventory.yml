@@ -10,13 +10,26 @@ all:
           ansible_host: 192.168.10.242
           ansible_network_os: ios       # napalm driver: ios, eos, junos, nxos, iosxr...
           icon: "C9200-24P Front"
+      # Palo Alto firewalls are collected over the PAN-OS XML API (HTTPS),
+      # either directly or through Panorama. Uncomment and adjust:
+      # children:
+      #   firewalls:
+      #     vars:
+      #       ansible_network_os: panos
+      #     hosts:
+      #       # Lab: straight to the firewall's management address
+      #       pa-fw1:
+      #         ansible_host: 192.168.10.80
+      #         panos_ca_file: /path/to/lab-ca.pem   # or, lab only:
+      #         # panos_verify_tls: false            # self-signed certificate
+      #       # Production: through Panorama, which proxies each request
+      #       pa-prod-fw1:
+      #         panos_via_panorama: true
+      #         panorama_host: 10.1.1.10
+      #         panos_serial: "007951000123456"      # optional: looked up by name
     artifact_server:
       hosts:
         diagram-host:
           ansible_host: 192.168.10.175
       vars:
         ansible_connection: ssh
-
-        # pa-fw1:
-        #   ansible_host: 192.168.10.80
-        #   ansible_network_os: panos
