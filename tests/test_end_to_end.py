@@ -12,8 +12,8 @@ import support
 class EndToEndTest(unittest.TestCase):
     def test_main_on_fixture_facts(self):
         with tempfile.TemporaryDirectory() as tmp:
-            template = Path(tmp) / "template.drawio"
-            shutil.copy(support.FIXTURES / "template.drawio", template)
+            template = Path(tmp) / "template.vsdx"
+            shutil.copy(support.FIXTURES / "template.vsdx", template)
             proc = subprocess.run(
                 [sys.executable, str(support.SCRIPTS / "main.py"), str(support.FACTS), tmp,
                  f"--inventory={support.FIXTURES / 'inventory.yml'}", f"--template={template}"],

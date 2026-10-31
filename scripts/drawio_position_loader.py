@@ -1,5 +1,7 @@
 """
-Load pinned node positions from a .drawio file instead of layout.yml.
+Reads node positions from an old template.drawio, so an existing layout
+carries over to the Visio position template (positions.py) the first time
+it runs. Only positions.load() uses it; it can go when draw.io does.
 
 Drop-in replacement for load_pinned_positions(layout_path): same return
 shape -- {hostname: {"x": ..., "y": ..., "side": ...}} with "side" only
@@ -111,45 +113,6 @@ def load_pinned_positions_from_drawio(drawio_path: str | Path, inventory_path: s
         print(f"No pinned position for {sorted(unpinned)} -- will use auto layout.")
 
     return pinned
-
-
-_TEMPLATE_NODE_STYLE = "rounded=0;whiteSpace=wrap;html=1;"
-
-
-def build_template_xml(positions: dict, sides: dict | None = None) -> str:
-    """Build a minimal .drawio file containing only one rectangle per node
-    -- no links, no IP/interface labels, no status dots -- so repositioning
-    nodes by hand isn't fighting through link clutter.
-
-    positions: {hostname: (x, y, w, h)} (top-left corner, draw.io convention)
-    sides: optional {hostname: side} for any node with a preferred
-    attachment side set -- round-tripped via the same custom "side"
-    property load_pinned_positions_from_drawio() already knows to read
-    back off an <object>-wrapped vertex.
-
-    Returns the XML string; write it to template.drawio yourself.
-    """
-    sides = sides or {}
-    mxfile = ET.Element("mxfile")
-    diagram = ET.SubElement(mxfile, "diagram", name="Positions")
-    model = ET.SubElement(diagram, "mxGraphModel")
-    root = ET.SubElement(model, "root")
-    ET.SubElement(root, "mxCell", id="0")
-    ET.SubElement(root, "mxCell", id="1", parent="0")
-
-    for i, name in enumerate(sorted(positions)):
-        x, y, w, h = positions[name]
-        cell_id = str(i + 2)
-        if name in sides:
-            obj = ET.SubElement(root, "object", id=cell_id, label=name, side=sides[name])
-            cell = ET.SubElement(obj, "mxCell", style=_TEMPLATE_NODE_STYLE, vertex="1", parent="1")
-        else:
-            cell = ET.SubElement(root, "mxCell", id=cell_id, value=name,
-                                  style=_TEMPLATE_NODE_STYLE, vertex="1", parent="1")
-        ET.SubElement(cell, "mxGeometry", x=str(x), y=str(y), width=str(w), height=str(h),
-                      **{"as": "geometry"})
-
-    return ET.tostring(mxfile, encoding="unicode")
 
 
 # ---------------------------------------------------------------------------

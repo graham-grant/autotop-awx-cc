@@ -99,8 +99,8 @@ class DiagramTest(unittest.TestCase):
                 for f in support.FACTS.glob("*.json"):
                     rec = json.loads(f.read_text())
                     (facts / f.name).write_text(json.dumps(drivers.load(rec) if convert else rec))
-                template = tmp / label / "template.drawio"
-                shutil.copy(support.FIXTURES / "template.drawio", template)
+                template = tmp / label / "template.vsdx"
+                shutil.copy(support.FIXTURES / "template.vsdx", template)
                 run_main(facts, tmp / label, template)
                 outputs.append((tmp / label / "topology.drawio").read_text())
             self.assertEqual(outputs[0], outputs[1])
@@ -116,8 +116,8 @@ class DiagramTest(unittest.TestCase):
                 rec["interfaces"].append(host(name, ("Vlan50", f"10.50.0.{i}/24", "default", 50,
                                                      True))["interfaces"][0])
                 (facts / f"{name}.json").write_text(json.dumps(rec))
-            template = tmp / "template.drawio"
-            shutil.copy(support.FIXTURES / "template.drawio", template)
+            template = tmp / "template.vsdx"
+            shutil.copy(support.FIXTURES / "template.vsdx", template)
             out = run_main(facts, tmp, template)
             self.assertIn("1 shared segment(s)", out)
 
@@ -130,13 +130,7 @@ class DiagramTest(unittest.TestCase):
             self.assertEqual(len(to_seg), 3)
 
             # the template now carries the segment; move it and rerun
-            tree = ET.parse(template)
-            cell = [c for c in tree.getroot().iter("mxCell")
-                    if c.get("value") == "segment 10.50.0.0/24"][0]
-            geo = cell.find("mxGeometry")
-            geo.set("x", "2000")
-            geo.set("y", "900")
-            tree.write(template)
+            support.edit_template_shape(template, "segment 10.50.0.0/24", x=2000, y=900)
             run_main(facts, tmp, template)
             root = ET.parse(tmp / "topology.drawio").getroot().find(".//root")
             geo = root.find("mxCell[@id='segment 10.50.0.0/24']/mxGeometry")

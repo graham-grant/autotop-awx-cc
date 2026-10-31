@@ -11,17 +11,17 @@ treats the buffer rule as a hard edge filter (with a one-shot soft-penalty
 fallback if no path exists otherwise). Links are routed one at a time,
 "stamping" their path into a shared congestion map so later links see and
 avoid earlier ones. Perpendicular crossings need no special handling here
-at all - draw.io renders a jump wherever two jumpStyle-enabled edges
-visually cross, so every emitted edge just gets jumpStyle set
-unconditionally (that part lives in renderer.build_drawio_xml).
+at all - draw.io renders a jump wherever two lines with jumps set
+visually cross, so every link just gets the "jumps" style
+(config.LINK_STYLE); Visio draws plain crossings.
 
 What this module does NOT decide on its own: which side of a node a given
 link should attach to in the first place (top/bottom/left/right). That
 choice is made by build_link_specs() below, using a per-node majority vote
 over its own links (so a hub with links at slightly different angles still
 ends up with all of them on one consistent side), with an optional
-per-node override settable via a custom "side" property on a node in
-template.drawio (see drawio_position_loader.py).
+per-node override settable via the "Side" Shape Data field of a node in
+the position template (see positions.py).
 """
 from __future__ import annotations
 import heapq

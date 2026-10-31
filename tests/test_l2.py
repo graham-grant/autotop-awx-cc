@@ -306,7 +306,7 @@ class McLagTest(unittest.TestCase):
             proc = subprocess.run(
                 [sys.executable, str(support.SCRIPTS / "main.py"), str(tmp / "facts"),
                  str(tmp), f"--inventory={tmp / 'inventory.yml'}",
-                 f"--template={tmp / 'template.drawio'}"],
+                 f"--template={tmp / 'template.vsdx'}"],
                 capture_output=True, text=True, cwd=tmp)
             self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
             values = [c.get("value") for c in
@@ -331,7 +331,7 @@ class VlansLayerTest(unittest.TestCase):
             tmp = Path(tmp)
             proc = subprocess.run(
                 [sys.executable, str(support.SCRIPTS / "main.py"), str(L2), str(tmp),
-                 f"--inventory={L2_INVENTORY}", f"--template={tmp / 'template.drawio'}"],
+                 f"--inventory={L2_INVENTORY}", f"--template={tmp / 'template.vsdx'}"],
                 capture_output=True, text=True, cwd=tmp)
             self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
             self.assertIn("feature vlans: ok", proc.stdout)

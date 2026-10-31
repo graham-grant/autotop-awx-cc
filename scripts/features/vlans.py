@@ -32,8 +32,8 @@ class VlansFeature(PortTagFeature):
     SETTINGS = {
         "offset": 34.0,         # how far out along the link from the switch's node
         "max_chars": 24,        # longer trunk lists are cut short with "..."
-        "style": "text;html=1;align=center;verticalAlign=middle;fontSize=8;"
-                 "labelBackgroundColor=#FFF2CC;fontColor=#7F6000;spacing=1;",
+        "style": {"kind": "text", "font_size": 8, "label_bg": "#FFF2CC",
+                  "font_color": "#7F6000", "spacing": 1},
     }
 
     def port_label(self, facet: dict, port: str) -> tuple[str, str] | None:

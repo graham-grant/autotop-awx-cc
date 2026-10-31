@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-Build a drawio topology diagram from the per-host JSON files written by
-playbooks/gather_topology.yml.
+Build the topology diagram, as a Microsoft Visio file and a draw.io file,
+from the per-host JSON files written by playbooks/gather_topology.yml.
 
 This is the coordinator: load data (parser.py), decide node positions and
-route every link through the Hanan-grid A* engine (pathfinder.py), then
-emit draw.io XML with IP/interface labels and status dots (renderer.py),
-then let each enabled protocol feature (features/ - e.g. IPsec tunnels)
-draw itself onto its own layer. Tunable settings live in config.py.
+route every link through the Hanan-grid A* engine (pathfinder.py), draw
+the nodes, links and interface labels into a format-independent diagram
+(renderer.py, diagram.py), let each enabled protocol feature (features/ -
+e.g. IPsec tunnels) draw itself onto its own layer, then write the diagram
+with each output format's own writer: vsdx.py (topology.vsdx) and
+drawio.py (topology.drawio). Neither writer reads the other's file.
+Tunable settings live in config.py.
 
 Runs on a base Python 3 install: no third-party packages. Host JSON is a
 schema 2 record per device (drivers/; older files are upgraded on load,
@@ -20,17 +23,16 @@ the device reports is grouped by network, and any subnet shared by exactly two
 inventory hosts becomes a link between them. A subnet shared by three or
 more hosts becomes a small segment node linked to each of them.
 
-Node positions are no longer kept in a YAML config - they're read straight
-out of template.drawio (drawio_position_loader.py), a stripped-down
-companion file containing just one rectangle per inventory host, no links
-or labels. Reposition nodes by opening that file, dragging them around,
-and saving - the next run picks the new positions straight up. A node can
-also get a preferred attachment side (top/bottom/left/right), overriding
-the automatic per-link choice, by adding a custom "side"
-property to it in draw.io (right-click -> Edit Style, or the Edit Data
-panel) - this round-trips the same way positions do.
+Node positions are read from the position template, template.vsdx
+(positions.py): a Visio file with one shape per node and no links or
+labels. Reposition nodes by opening it in Visio, dragging them around, and
+saving - the next run picks the new positions straight up. A node can also
+get a preferred attachment side (top/bottom/left/right), overriding the
+automatic per-link choice, in its "Side" Shape Data field - this
+round-trips the same way positions do. An older template.drawio next to it
+is read once, if template.vsdx doesn't exist yet.
 
-template.drawio itself is regenerated every run to match whatever's
+The template itself is regenerated every run to match whatever's
 currently in inventory.yml: existing nodes keep whatever position you last
 left them at, new nodes appear in a simple staging grid below the rest,
 ready to be dragged into place. There's no positioning library involved
@@ -40,20 +42,27 @@ reposition it by hand once.
 
 Usage:
     python3 main.py [facts_dir] [output_dir] [--inventory=PATH] [--template=PATH]
-                    [--icon-library=PATH] [--reparse]
+                    [--icons=DIR] [--reparse] [--formats=vsdx,drawio]
 
 Defaults: facts_dir=output/facts, output_dir=output,
-inventory=<project root>/inventory.yml, template=<project root>/template.drawio,
-icon-library=<project root>/docs/Prod_Library.xml
+inventory=<project root>/inventory.yml, template=<project root>/template.vsdx,
+icons=<project root>/icons
 
 Each host can get a preferred icon by adding an `icon:` key to its entry
 in inventory.yml (or a `vars: {icon: ...}` block on a group, inherited by
-every host under it) - the value must match an entry's title in the icon
-library exactly, e.g. icon: "C9200-24P Front". A host with no icon set
-falls back to the plain rectangle.
+every host under it) - the value names a PNG in the icons folder, with or
+without .png, e.g. icon: "C9200-24P Front" for icons/C9200-24P Front.png.
+A host with no icon set, or whose icon isn't found, falls back to the
+plain rectangle.
+
+--formats (default config.OUTPUT_FORMATS) picks the files written:
+"vsdx" for topology.vsdx, "drawio" for topology.drawio. An output file of
+a format that isn't picked is deleted, so an old one is never mistaken for
+this run's. If a writer fails, its file is deleted, the other formats and
+the template are still written, and the exit status is 3. If the template
+can't be written, the old one is left as it was and the exit status is 3.
 """
 import sys
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import config
@@ -64,7 +73,17 @@ import pathfinder
 import renderer
 import icon_library
 import inventory
-import drawio_position_loader as dpl
+import drawio
+import positions
+import vsdx
+
+EXIT_OUTPUT_FAILED = 3
+
+# format name -> (file name, writer). Each writer takes (diagram, path).
+WRITERS = {
+    "vsdx": ("topology.vsdx", vsdx.write),
+    "drawio": ("topology.drawio", drawio.write),
+}
 
 
 def _parse_path_arg(argv, flag, default):
@@ -76,7 +95,7 @@ def _parse_path_arg(argv, flag, default):
 
 def _place_unpinned_nodes(pinned, unpinned_names, sizes=None):
     """Simple staging-grid placement for any node with no position in
-    template.drawio yet. No layout library involved - just somewhere
+    the position template yet. No layout library involved - just somewhere
     visible below whatever's already pinned, meant to be dragged into
     place by hand on the next pass rather than auto-arranged well.
 
@@ -159,7 +178,7 @@ def main():
     out_dir = positional[1] if len(positional) > 1 else config.DEFAULT_OUTPUT_DIR
     inventory_path = _parse_path_arg(argv, "--inventory", config.DEFAULT_INVENTORY_PATH)
     template_path = _parse_path_arg(argv, "--template", config.DEFAULT_TEMPLATE_PATH)
-    icon_library_path = _parse_path_arg(argv, "--icon-library", config.DEFAULT_ICON_LIBRARY_PATH)
+    icon_dir = _parse_path_arg(argv, "--icons", config.DEFAULT_ICON_DIR)
 
     nodes = parser.load_nodes(facts_dir, reparse="--reparse" in argv)
     if not nodes:
@@ -170,7 +189,7 @@ def main():
     node_names = [n["device"]["name"] for n in nodes]
     segment_ids = [s["id"] for s in segments]
 
-    pinned = dpl.load_pinned_positions_from_drawio(template_path, inventory_path)
+    pinned = positions.load(template_path, inventory_path)
     pinned = {k: v for k, v in pinned.items()  # drop segments that no longer exist
               if not k.startswith(parser.SEGMENT_PREFIX) or k in segment_ids}
 
@@ -180,7 +199,7 @@ def main():
     unpinned = [name for name in node_names if name not in pinned]
     new_positions = _place_unpinned_nodes(pinned, unpinned, sizes) if unpinned else {}
     if unpinned:
-        print(f"Note: {len(unpinned)} node(s) have no position in template.drawio yet, "
+        print(f"Note: {len(unpinned)} node(s) have no position in the template yet, "
               f"placed in a staging grid: {', '.join(unpinned)}")
 
     centers = {}
@@ -197,31 +216,68 @@ def main():
     hanan_nodes, specs = pathfinder.build_link_specs(edges, centers, sizes, preferred_sides)
 
     icons_by_id = parser.load_icons(inventory_path)
-    icon_lib = icon_library.load_icon_library(icon_library_path)
-    mxfile = renderer.render_tree(hanan_nodes, specs, edges_by_id, icons_by_id, icon_lib,
-                                  segments)
+    icons = icon_library.load(icon_dir) if icons_by_id else {}
+    diagram = renderer.build(hanan_nodes, specs, edges_by_id, icons_by_id, icons, segments)
 
-    # Protocol features (features/), each on its own draw.io layer above the
+    # Protocol features (features/), each on its own layer above the
     # physical diagram. A feature that fails is reported and left out.
     topo = Topology(nodes, edges, hanan_nodes, specs, segments)
-    feature_results = features.run_features(mxfile.find(".//root"), topo)
-    xml_str = ET.tostring(mxfile, encoding="unicode")
+    feature_results = features.run_features(diagram.pages[0], topo)
 
-    Path(out_dir).mkdir(parents=True, exist_ok=True)
-    out_path = Path(out_dir) / "topology.drawio"
-    out_path.write_text(xml_str)
     seg_note = f" and {len(segments)} shared segment(s)" if segments else ""
-    print(f"\nWrote {len(nodes)} nodes{seg_note} and {len(edges)} links to {out_path}")
+    print(f"\nDrew {len(nodes)} nodes{seg_note} and {len(edges)} links")
     for name, status in feature_results.items():
         print(f"  feature {name}: {status}")
 
-    # Regenerate template.drawio from this run's final node positions/sizes,
-    # so it always matches the current inventory and carries forward
-    # whatever position/side each node already had.
-    final_positions = {n.id: (n.x, n.y, n.w, n.h) for n in hanan_nodes}
-    template_xml = dpl.build_template_xml(final_positions, preferred_sides)
-    Path(template_path).write_text(template_xml)
-    print(f"Wrote position template to {template_path}")
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    failed = write_outputs(diagram, out_dir, _formats(argv))
+
+    # Regenerate the position template from this run's final node
+    # positions/sizes, so it always matches the current inventory and
+    # carries forward whatever position/side each node already had.
+    page = diagram.pages[0]
+    try:
+        written = positions.write_template(template_path, [page.get(n.id) for n in hanan_nodes],
+                                           preferred_sides)
+        print(f"Wrote position template to {written}")
+    except Exception as e:  # noqa: BLE001 - keep the old template, report, exit 3
+        print(f"ERROR: the position template couldn't be written "
+              f"({positions.output_path(template_path)} is unchanged): {e}")
+        failed.append("template")
+    if failed:
+        sys.exit(EXIT_OUTPUT_FAILED)
+
+
+def _formats(argv) -> list:
+    value = next((a.split("=", 1)[1] for a in argv if a.startswith("--formats=")), None)
+    formats = ([f.strip() for f in value.split(",") if f.strip()] if value is not None
+               else list(config.OUTPUT_FORMATS))
+    unknown = [f for f in formats if f not in WRITERS]
+    if unknown:
+        sys.exit(f"Unknown output format(s): {', '.join(unknown)} "
+                 f"(choose from {', '.join(WRITERS)})")
+    return formats
+
+
+def write_outputs(diagram, out_dir, formats) -> list:
+    """Write the diagram in each format. Each writer is independent: one
+    that fails is reported and its file deleted (never a stale or partial
+    file), and the rest are still written. Returns the formats that failed."""
+    failed = []
+    for fmt, (name, writer) in WRITERS.items():
+        path = Path(out_dir) / name
+        if fmt not in formats:
+            path.unlink(missing_ok=True)   # don't leave an older run's file behind
+            continue
+        try:
+            writer(diagram, path)
+        except Exception as e:
+            failed.append(fmt)
+            path.unlink(missing_ok=True)
+            print(f"ERROR: {name} couldn't be written: {type(e).__name__}: {e}")
+            continue
+        print(f"Wrote {path}")
+    return failed
 
 
 if __name__ == "__main__":

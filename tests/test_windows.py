@@ -209,7 +209,7 @@ class ServerPlacementTest(unittest.TestCase):
                 f"    {n}: {{}}\n" for n in ("rtr1", "sw1", "sw2", "srv1", "srv2", "srv-win1")))
             proc = subprocess.run(
                 [sys.executable, str(support.SCRIPTS / "main.py"), str(facts), str(tmp),
-                 f"--inventory={tmp / 'inventory.yml'}", f"--template={tmp / 'template.drawio'}"],
+                 f"--inventory={tmp / 'inventory.yml'}", f"--template={tmp / 'template.vsdx'}"],
                 capture_output=True, text=True, cwd=tmp)
             self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
             root = ET.parse(tmp / "topology.drawio").getroot().find(".//root")
