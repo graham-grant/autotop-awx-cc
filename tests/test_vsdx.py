@@ -128,6 +128,87 @@ class PackageTest(unittest.TestCase):
         self.assertEqual(Package.text(shape), "zipped")
 
 
+# Visio's schema fixes the order of a sheet's children, and Visio refuses
+# ("some parts are missing or invalid") a file that breaks it.
+SHEET_ORDER = ["Cell", "Trigger", "Section", "Text", "Data1", "Data2", "Data3",
+               "ForeignData", "Shapes"]
+
+
+def schema_problems(pkg):
+    """The structural rules of Visio's schema that this writer could break."""
+    problems = []
+
+    def ordered(el, order, where):
+        ranks = [order.index(child.tag.split("}")[1]) if child.tag.split("}")[1] in order
+                 else -1 for child in el]
+        if -1 in ranks:
+            problems.append(f"{where}: unexpected child {list(el)[ranks.index(-1)].tag}")
+        elif ranks != sorted(ranks):
+            problems.append(f"{where}: children out of order: "
+                            + " ".join(c.tag.split("}")[1] for c in el))
+
+    for name in sorted(pkg.names):
+        if not name.endswith(".xml") or not name.startswith("visio/"):
+            continue
+        root = pkg.xml(name)
+        for tag in ("Shape", "StyleSheet", "PageSheet"):
+            for sheet in root.iter(V + tag):
+                ordered(sheet, SHEET_ORDER, f"{name} {tag} {sheet.get('ID', '')}")
+        for section in root.iter(V + "Section"):
+            ordered(section, ["Cell", "Row"], f"{name} Section {section.get('N')}")
+        for cell in root.iter(V + "Cell"):
+            if cell.get("N") is None or cell.get("V") is None:
+                problems.append(f"{name}: Cell without N or V")
+        ids = [s.get("ID") for s in root.iter(V + "Shape")]
+        if len(ids) != len(set(ids)):
+            problems.append(f"{name}: duplicate shape IDs")
+        rels_name = name.rsplit("/", 1)[0] + "/_rels/" + name.rsplit("/", 1)[1] + ".rels"
+        rids = ({r.get("Id") for r in pkg.xml(rels_name).findall(f"{PKG}Relationship")}
+                if rels_name in pkg.names else set())
+        for rel in root.iter(V + "Rel"):
+            rid = rel.get("{%s}id" % vsdx.R_NS)
+            if rid not in rids:
+                problems.append(f"{name}: Rel {rid} has no relationship")
+    for part in ("visio/document.xml", "visio/pages/pages.xml", "visio/windows.xml",
+                 "docProps/core.xml", "docProps/app.xml"):
+        if part not in pkg.names:
+            problems.append(f"missing {part}")
+    return problems
+
+
+class SchemaTest(unittest.TestCase):
+    """Every kind of shape the writer makes, in one file, follows the schema."""
+
+    def test_structure(self):
+        lib = icon_library.load_icon_library(config.DEFAULT_ICON_LIBRARY_PATH)
+        cells = [
+            '<mxCell id="layer-x" value="X" style="locked=1;" parent="0"/>',
+            box("a", 0, 0, 96, 48, "A", lib["C9200-24P Front"].style),
+            box("b", 300, 200, 96, 48, "B", "rounded=1;"),
+            '<object id="t" label="tip" tooltip="hover" link="data:page/id,p2" k="v">'
+            + box("t", 0, 300, 96, 48, parent="layer-x").replace(' id="t" value=""', "")
+            + "</object>",
+            box("e", 200, 0, 14, 14, "", "ellipse;"),
+            '<object id="l" label="" tooltip="a link" link="data:page/id,p2">'
+            '<mxCell style="curved=1;dashed=1;" edge="1" parent="1" source="a" target="b">'
+            '<mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="200" y="100"/>'
+            '</Array></mxGeometry></mxCell></object>',
+            '<mxCell id="lbl" value="Gi1" style="text;html=1;rotation=-90;" vertex="1" parent="l">'
+            '<mxGeometry x="-1" relative="1" as="geometry"><mxPoint as="offset"/></mxGeometry></mxCell>']
+        pkg = Package(mxfile(("p1", "One", cells), ("p2", "Two", [box("z", 0, 0, 96, 48, "Z")])))
+        self.assertEqual(schema_problems(pkg), [])
+
+    def test_main_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out = MainTest.run_main(MainTest(), tmp)
+            self.assertEqual(code, 0, out)
+            with open(Path(tmp) / "topology.vsdx", "rb") as f:
+                pkg = Package.__new__(Package)
+                pkg.zip = zipfile.ZipFile(io.BytesIO(f.read()))
+                pkg.names = set(pkg.zip.namelist())
+            self.assertEqual(schema_problems(pkg), [])
+
+
 class GeometryTest(unittest.TestCase):
     def test_inches_and_y_flipped(self):
         # two boxes 2 in apart; the page is their bounds plus a 0.5 in margin

@@ -318,26 +318,25 @@ class _PageWriter:
         return self.height - ((y - self.min_y) / PX_PER_INCH + MARGIN_IN)
 
     # -- pieces shared by every shape -------------------------------------
-    def _extras(self, cell: _Cell) -> list[str]:
-        out = []
+    def _extras(self, cell: _Cell):
+        """The ScreenTip cell, and the Shape Data and Hyperlink sections."""
+        cells, sections = [], []
         tip = cell.attrs.get("tooltip")
         if tip:
-            out.append(_c("Comment", tip))
+            cells.append(_c("Comment", tip))
         data = {k: v for k, v in cell.attrs.items() if k not in ("tooltip", "link")}
         if data:
             used: set = set()
-            out.append('<Section N="Property">')
-            for k, v in data.items():
-                out.append(f'<Row N="{_row_name(k, used)}">{_c("Label", k)}'
-                           f'{_c("Value", v)}{_c("Type", 0)}</Row>')
-            out.append("</Section>")
+            sections.append('<Section N="Property">' + "".join(
+                f'<Row N="{_row_name(k, used)}">{_c("Value", v, "STR")}{_c("Label", k)}'
+                f'{_c("Type", 0)}</Row>' for k, v in data.items()) + "</Section>")
         link = self._hyperlink(cell.attrs.get("link"))
         if link:
             address, sub, desc = link
-            out.append('<Section N="Hyperlink"><Row N="Row_1">' + _c("Description", desc)
-                       + _c("Address", address) + _c("SubAddress", sub) + _c("NewWindow", 0)
-                       + _c("Default", 1) + "</Row></Section>")
-        return out
+            sections.append('<Section N="Hyperlink"><Row N="Row_1">' + _c("Description", desc)
+                            + _c("Address", address) + _c("SubAddress", sub)
+                            + _c("NewWindow", 0) + _c("Default", 1) + "</Row></Section>")
+        return cells, sections
 
     def _hyperlink(self, link: str | None):
         if not link:
@@ -363,6 +362,7 @@ class _PageWriter:
         return None
 
     def _text_cells(self, cell: _Cell, text: str, below: bool, w_in: float, h_in: float):
+        """The text block's cells, and its Character and Paragraph sections."""
         st = cell.style
         out = []
         font_px = float(st.get("fontSize", _DEFAULT_FONT_PX))
@@ -380,16 +380,22 @@ class _PageWriter:
         out += [_c("VerticalAlign", valign), _c("LeftMargin", pad, "PT"),
                 _c("RightMargin", pad, "PT"), _c("TopMargin", pad, "PT"),
                 _c("BottomMargin", pad, "PT")]
-        out.append('<Section N="Character"><Row IX="0">' + _c("Color", color)
-                   + _c("Style", bits) + _c("Size", font_px / PX_PER_INCH, "PT") + "</Row></Section>")
-        out.append('<Section N="Paragraph"><Row IX="0">' + _c("HorzAlign", align)
-                   + "</Row></Section>")
-        return out
+        sections = ['<Section N="Character"><Row IX="0">' + _c("Color", color) + _c("Style", bits)
+                    + _c("Size", font_px / PX_PER_INCH, "PT") + "</Row></Section>",
+                    '<Section N="Paragraph"><Row IX="0">' + _c("HorzAlign", align)
+                    + "</Row></Section>"]
+        return out, sections
 
-    def _begin(self, kind="Shape"):
+    def _add(self, kind, cells, sections, text="", foreign=""):
+        """Append one shape. Visio's schema fixes the order of a shape's
+        children - every Cell, then every Section, then Text, then
+        ForeignData - and Visio refuses a file that breaks it."""
         sid = self.next_id
         self.next_id += 1
-        return sid, [f'<Shape ID="{sid}" Type="{kind}" LineStyle="0" FillStyle="0" TextStyle="0">']
+        self.shapes.append(
+            f'<Shape ID="{sid}" Type="{kind}" LineStyle="0" FillStyle="0" TextStyle="0">'
+            + "".join(cells) + "".join(sections)
+            + (f"<Text>{escape(text)}</Text>" if text else "") + foreign + "</Shape>")
 
     # -- shapes -----------------------------------------------------------
     def box(self, cell: _Cell, rect, layer: str | None, text: str):
@@ -411,7 +417,7 @@ class _PageWriter:
             fill = _color(st.get("fillColor"), "#FFFFFF")
             line = _color(st.get("strokeColor"), "#000000") if st.get("strokeColor") != "none" else None
 
-        sid, out = self._begin("Foreign" if png else "Shape")
+        out = []   # this shape's cells
         if png:
             # letterbox the picture inside the node's box, as draw.io does
             iw, ih = _png_size(png)
@@ -444,18 +450,23 @@ class _PageWriter:
         if png:
             out += [_c("ImgOffsetX", 0.0, "IN"), _c("ImgOffsetY", 0.0, "IN"),
                     _c("ImgWidth", w_in, "IN"), _c("ImgHeight", h_in, "IN")]
+        sections = []
         below = st.get("verticalLabelPosition") == "bottom"
         if text or below:
-            out += self._text_cells(cell, text, below, w_in, h_in)
-        out += self._extras(cell)
-        out.append('<Section N="Geometry" IX="0">' + _c("NoFill", 0 if fill else 1)
-                   + _c("NoLine", 0 if line else 1))
+            text_cells, text_sections = self._text_cells(cell, text, below, w_in, h_in)
+            out += text_cells
+            sections += text_sections
+        extra_cells, extra_sections = self._extras(cell)
+        out += extra_cells
+        sections += extra_sections
         if "ellipse" in st:
-            out.append(f'<Row T="Ellipse" IX="1">{_c("X", w_in / 2)}{_c("Y", h_in / 2)}'
-                       f'{_c("A", w_in)}{_c("B", h_in / 2)}{_c("C", w_in / 2)}{_c("D", h_in)}</Row>')
+            rows = [f'<Row T="Ellipse" IX="1">{_c("X", w_in / 2)}{_c("Y", h_in / 2)}'
+                    f'{_c("A", w_in)}{_c("B", h_in / 2)}{_c("C", w_in / 2)}{_c("D", h_in)}</Row>']
         else:
-            out += _rect_rows(w_in, h_in, radius)
-        out.append("</Section>")
+            rows = _rect_rows(w_in, h_in, radius)
+        sections.append('<Section N="Geometry" IX="0">' + _c("NoFill", 0 if fill else 1)
+                        + _c("NoLine", 0 if line else 1) + "".join(rows) + "</Section>")
+        foreign = ""
         if png:
             # each distinct picture is stored once, however many nodes use it
             part = self.media.get(png)
@@ -466,12 +477,9 @@ class _PageWriter:
             if rid is None:
                 rid = f"rId{len(self.rels) + 1}"
                 self.rels.append((rid, target))
-            out.append(f'<ForeignData ForeignType="Bitmap" CompressionType="PNG"><Rel r:id="{rid}"/>'
-                       "</ForeignData>")
-        if text:
-            out.append(f"<Text>{escape(text)}</Text>")
-        out.append("</Shape>")
-        self.shapes.append("".join(out))
+            foreign = (f'<ForeignData ForeignType="Bitmap" CompressionType="PNG">'
+                       f'<Rel r:id="{rid}"/></ForeignData>')
+        self._add("Foreign" if png else "Shape", out, sections, text, foreign)
 
     def line(self, cell: _Cell, points, layer: str | None):
         st = cell.style
@@ -482,8 +490,7 @@ class _PageWriter:
         w_in, h_in = max(max(xs) - left, 0.01), max(max(ys) - bottom, 0.01)
         color = _color(st.get("strokeColor"), "#000000")
         dashed = st.get("dashed") == "1"
-        sid, out = self._begin()
-        out += [_c("PinX", left + w_in / 2, "IN"), _c("PinY", bottom + h_in / 2, "IN"),
+        out = [_c("PinX", left + w_in / 2, "IN"), _c("PinY", bottom + h_in / 2, "IN"),
                 _c("Width", w_in, "IN"), _c("Height", h_in, "IN"),
                 _c("LocPinX", w_in / 2, "IN"), _c("LocPinY", h_in / 2, "IN")]
         if layer is not None:
@@ -494,13 +501,13 @@ class _PageWriter:
                 _c("BeginArrow", _ARROWS.get(st.get("startArrow", "none"), 5)),
                 _c("EndArrow", _ARROWS.get(st.get("endArrow", "classic"), 5)),
                 _c("BeginArrowSize", 1), _c("EndArrowSize", 1)]
-        out += self._extras(cell)
-        out.append('<Section N="Geometry" IX="0">' + _c("NoFill", 1) + _c("NoLine", 0))
-        for i, (px, py) in enumerate(zip(xs, ys)):
-            out.append(f'<Row T="{"MoveTo" if i == 0 else "LineTo"}" IX="{i + 1}">'
-                       f'{_c("X", px - left)}{_c("Y", py - bottom)}</Row>')
-        out.append("</Section></Shape>")
-        self.shapes.append("".join(out))
+        extra_cells, sections = self._extras(cell)
+        out += extra_cells
+        sections.append('<Section N="Geometry" IX="0">' + _c("NoFill", 1) + _c("NoLine", 0) + "".join(
+            f'<Row T="{"MoveTo" if i == 0 else "LineTo"}" IX="{i + 1}">'
+            f'{_c("X", px - left)}{_c("Y", py - bottom)}</Row>'
+            for i, (px, py) in enumerate(zip(xs, ys))) + "</Section>")
+        self._add("Shape", out, sections)
 
     def xml(self) -> str:
         return (f'<?xml version="1.0" encoding="utf-8" standalone="yes"?>'
@@ -673,7 +680,7 @@ _STYLE_SHEET = (
         ("VerticalAlign", 1, None), ("TextBkgnd", 0, None), ("DefaultTabStop", 0.5, "IN"),
         ("TextDirection", 0, None), ("TextBkgndTrans", 0.0, None), ("LockTextEdit", 0, None),
         ("NoObjHandles", 0, None), ("NonPrinting", 0, None), ("NoAlignBox", 0, None),
-        ("HideText", 0, None), ("ObjType", 0, None), ("LayerMember", "", None)])
+        ("HideText", 0, None), ("ObjType", 0, None)])
     + '<Section N="Character"><Row IX="0">' + _c("Font", "Calibri") + _c("Color", "#000000")
     + _c("Style", 0) + _c("Size", 12 / 96, "PT") + "</Row></Section>"
     + '<Section N="Paragraph"><Row IX="0">' + _c("HorzAlign", 1) + "</Row></Section>"
@@ -700,6 +707,11 @@ def write(mxfile: ET.Element, path) -> dict:
         layers = _convert_page(_model(d), writer)
         pages.append((page_names[d.get("id") or f"__page{i}"], writer, layers))
 
+    if not pages:   # Visio needs at least one page
+        writer = _PageWriter(page_names, media)
+        writer.set_frame(0, 0, 0, 0)
+        pages.append(("Page-1", writer, []))
+    first_w, first_h = pages[0][1].width, pages[0][1].height
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     head = '<?xml version="1.0" encoding="utf-8" standalone="yes"?>'
     parts = {
@@ -710,6 +722,7 @@ def write(mxfile: ET.Element, path) -> dict:
         '<Default Extension="png" ContentType="image/png"/>'
         '<Override PartName="/visio/document.xml" ContentType="application/vnd.ms-visio.drawing.main+xml"/>'
         '<Override PartName="/visio/pages/pages.xml" ContentType="application/vnd.ms-visio.pages+xml"/>'
+        '<Override PartName="/visio/windows.xml" ContentType="application/vnd.ms-visio.windows+xml"/>'
         + "".join(f'<Override PartName="/visio/pages/page{i + 1}.xml" '
                   'ContentType="application/vnd.ms-visio.page+xml"/>' for i in range(len(pages)))
         + '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>'
@@ -735,7 +748,7 @@ def write(mxfile: ET.Element, path) -> dict:
         + f'<VisioDocument xmlns="{NS}" xmlns:r="{R_NS}" xml:space="preserve">'
         '<DocumentSettings TopPage="0" DefaultTextStyle="0" DefaultLineStyle="0" '
         'DefaultFillStyle="0" DefaultGuideStyle="0"><GlueSettings>9</GlueSettings>'
-        "<SnapSettings>65847</SnapSettings><SnapExtensions>34</SnapExtensions>"
+        "<SnapSettings>65847</SnapSettings><SnapExtensions>34</SnapExtensions><SnapAngles/>"
         "<DynamicGridEnabled>0</DynamicGridEnabled><ProtectStyles>0</ProtectStyles>"
         "<ProtectShapes>0</ProtectShapes><ProtectMasters>0</ProtectMasters>"
         "<ProtectBkgnds>0</ProtectBkgnds></DocumentSettings>"
@@ -745,7 +758,20 @@ def write(mxfile: ET.Element, path) -> dict:
         + _STYLE_SHEET + "</VisioDocument>",
         "visio/_rels/document.xml.rels": head + f'<Relationships xmlns="{PKG_REL_NS}">'
         f'<Relationship Id="rId1" Type="{VISIO_REL}/pages" Target="pages/pages.xml"/>'
+        f'<Relationship Id="rId2" Type="{VISIO_REL}/windows" Target="windows.xml"/>'
         "</Relationships>",
+        # the window Visio opens with: the first page, whole page in view
+        "visio/windows.xml": head
+        + f'<Windows ClientWidth="1280" ClientHeight="800" xmlns="{NS}" xmlns:r="{R_NS}" '
+        'xml:space="preserve"><Window ID="0" WindowType="Drawing" WindowState="1073741824" '
+        'WindowLeft="0" WindowTop="0" WindowWidth="1280" WindowHeight="800" ContainerType="Page" '
+        f'Page="0" ViewScale="-1" ViewCenterX={quoteattr(_num(first_w / 2))} '
+        f'ViewCenterY={quoteattr(_num(first_h / 2))}>'
+        "<ShowRulers>1</ShowRulers><ShowGrid>0</ShowGrid><ShowPageBreaks>0</ShowPageBreaks>"
+        "<ShowGuides>1</ShowGuides><ShowConnectionPoints>0</ShowConnectionPoints>"
+        "<GlueSettings>9</GlueSettings><SnapSettings>65847</SnapSettings>"
+        "<SnapExtensions>34</SnapExtensions><SnapAngles/><DynamicGridEnabled>0</DynamicGridEnabled>"
+        "<TabSplitterPos>0.5</TabSplitterPos></Window></Windows>",
         "visio/pages/pages.xml": head
         + f'<Pages xmlns="{NS}" xmlns:r="{R_NS}" xml:space="preserve">'
         + "".join(f'<Page ID="{i}" NameU={quoteattr(name)} Name={quoteattr(name)} ViewScale="-1">'

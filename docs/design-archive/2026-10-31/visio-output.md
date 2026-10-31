@@ -77,6 +77,16 @@ arrowhead index for draw.io's default arrow, and draw.io's default font
 size (12 px, not 11). The VRF mockup's six pages, 383 shapes, 74 page links
 and tooltips also convert and open.
 
+The first samples opened in LibreOffice and draw.io but not in Visio
+("some parts are missing or invalid"). LibreOffice and draw.io read
+leniently, Visio checks the file against its schema. Two things broke it:
+a shape's tooltip cell was written after its text sections, while the
+schema requires every `Cell` before every `Section`, then `Text`, then
+`ForeignData`; and the package had no `visio/windows.xml`, which every
+Visio-saved file has. Both are fixed, and `tests/test_vsdx.py` now checks
+those structural rules on every kind of shape the writer makes and on a
+full `main.py` run.
+
 `tests/test_vsdx.py` checks the package structure (every relationship
 resolves, every part has a content type), positions and the y flip, routed
 points, labels on lines, arrows, curves, layers, tooltips, page and web
