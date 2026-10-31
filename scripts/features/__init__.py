@@ -13,16 +13,21 @@ features can be added one at a time without touching each other:
                                  self.facet)) and the core (topo.hosts)
   plan(data, topo)     -> plan   geometry: where things go, relative to the
                                  already-routed physical diagram
-  render(plan, layer)            emit cells into this feature's own
-                                 draw.io layer (toggle it in Edit > Layers)
+  render(plan, layer)            add lines and labels to this feature's
+                                 own layer (toggled in draw.io's Layers
+                                 panel, and in Visio's Layer Properties)
 
 Isolation guarantees, enforced by run_features():
 - every feature gets its own deep copy of the topology, so it can't
   mutate state another feature (or the base diagram) relies on;
-- a feature's cells only reach the diagram if all three steps succeed -
+- a feature's items only reach the diagram if all three steps succeed -
   an exception is printed and that feature's layer is skipped, nothing
   else is affected;
-- cell ids are namespaced by feature name, so two features can't collide.
+- item ids are namespaced by feature name, so two features can't collide.
+
+Features draw into the format-independent diagram (diagram.py), with
+style dicts rather than any file format's styles, so the same layer appears
+in both the draw.io and the Visio file.
 
 A feature never reads vendor output. It declares the facet it draws
 (`facet = "ipsec"`), each platform driver (scripts/drivers/) says which
@@ -37,14 +42,14 @@ import copy
 import importlib
 import pkgutil
 import traceback
-import xml.etree.ElementTree as ET
 
 import config
+import diagram as dg
 
 
 class Feature:
     name: str = ""              # unique id: facts key, cell-id prefix, settings key
-    label: str = ""             # draw.io layer name
+    label: str = ""             # layer name
     facet: str | None = None    # the facets[...] key this feature draws
     SETTINGS: dict = {}         # defaults, overridable via config.FEATURE_SETTINGS
 
@@ -63,65 +68,51 @@ class Feature:
 
 
 class Layer:
-    """Collects one feature's cells; only attached to the diagram once the
+    """Collects one feature's items; only added to the diagram once the
     feature has finished without errors."""
 
     def __init__(self, feature: Feature):
         self.prefix = feature.name
         self.id = f"layer-{feature.name}"
         self.label = feature.label or feature.name
-        self.cells: list[ET.Element] = []
-        self._ids: set[str] = set()
+        self.items: list = []
+        self._ids: set = set()
 
-    def _cell_id(self, local_id: str) -> str:
-        cid = f"{self.prefix}-{local_id}"
-        if cid in self._ids:
-            raise ValueError(f"duplicate cell id {cid}")
-        self._ids.add(cid)
-        return cid
+    def _item_id(self, local_id: str) -> str:
+        iid = f"{self.prefix}-{local_id}"
+        if iid in self._ids:
+            raise ValueError(f"duplicate item id {iid}")
+        self._ids.add(iid)
+        return iid
 
-    def edge(self, local_id, source, target, style, points=(), exit=None, entry=None,
+    def edge(self, local_id, source, target, style: dict, points=(), exit=None, entry=None,
              value="", tooltip=None):
-        """A draw.io edge between two existing node ids. `points` are
-        (x, y) waypoints; exit/entry are optional (fx, fy) perimeter
-        fractions pinning where the edge leaves/meets each node."""
-        cid = self._cell_id(local_id)
-        if exit:
-            style += f"exitX={exit[0]};exitY={exit[1]};exitDx=0;exitDy=0;exitPerimeter=0;"
-        if entry:
-            style += f"entryX={entry[0]};entryY={entry[1]};entryDx=0;entryDy=0;entryPerimeter=0;"
-        attrs = {"style": style, "edge": "1", "source": source, "target": target,
-                 "parent": self.id}
-        if tooltip:
-            wrapper = ET.Element("object", {"id": cid, "label": value, "tooltip": tooltip})
-            cell = ET.SubElement(wrapper, "mxCell", attrs)
-        else:
-            wrapper = cell = ET.Element("mxCell", {"id": cid, "value": value, **attrs})
-        geom = ET.SubElement(cell, "mxGeometry", {"relative": "1", "as": "geometry"})
-        if points:
-            arr = ET.SubElement(geom, "Array", {"as": "points"})
-            for x, y in points:
-                ET.SubElement(arr, "mxPoint", {"x": f"{x:.2f}", "y": f"{y:.2f}"})
-        self.cells.append(wrapper)
-        return cid
+        """A line between two existing node ids. `points` are (x, y)
+        waypoints; exit/entry are optional (fx, fy) perimeter fractions
+        pinning where it leaves/meets each node. `style` is a diagram.py
+        style dict."""
+        line = dg.Line(self._item_id(local_id), style=dict(style), text=value, layer=self.id,
+                       tooltip=tooltip, source=source, target=target,
+                       waypoints=[(round(x, 2), round(y, 2)) for x, y in points],
+                       exit=tuple(exit) if exit else None, entry=tuple(entry) if entry else None)
+        self.items.append(line)
+        return line.id
 
-    def text(self, local_id, x, y, value, style, w=60, h=16, tooltip=None):
-        """A free-standing text label centred on (x, y)."""
-        cid = self._cell_id(local_id)
-        attrs = {"style": style, "vertex": "1", "connectable": "0", "parent": self.id}
-        if tooltip:
-            wrapper = ET.Element("object", {"id": cid, "label": value, "tooltip": tooltip})
-            cell = ET.SubElement(wrapper, "mxCell", attrs)
-        else:
-            wrapper = cell = ET.Element("mxCell", {"id": cid, "value": value, **attrs})
-        ET.SubElement(cell, "mxGeometry", {"x": f"{x - w / 2:.2f}", "y": f"{y - h / 2:.2f}",
-                                           "width": str(w), "height": str(h), "as": "geometry"})
-        self.cells.append(wrapper)
-        return cid
+    def text(self, local_id, x, y, value, style: dict, w=60, h=16, tooltip=None):
+        """A free-standing label centred on (x, y)."""
+        shape = dg.Shape(self._item_id(local_id), style={"kind": "text", **style}, text=value,
+                         layer=self.id, tooltip=tooltip,
+                         x=round(x - w / 2, 2), y=round(y - h / 2, 2), w=w, h=h)
+        self.items.append(shape)
+        return shape.id
 
-    def attach(self, root: ET.Element):
-        ET.SubElement(root, "mxCell", {"id": self.id, "value": self.label, "parent": "0"})
-        root.extend(self.cells)
+    def attach(self, page: dg.Page):
+        clash = [i.id for i in self.items if page.has(i.id)]
+        if clash or page.has(self.id):
+            raise ValueError(f"id already on the page: {(clash or [self.id])[0]}")
+        page.add_layer(dg.Layer(self.id, self.label))
+        for item in self.items:
+            page.add(item)
 
 
 def discover() -> dict[str, Feature]:
@@ -165,9 +156,9 @@ def facets_enabled() -> list[str]:
     return facets
 
 
-def run_features(root: ET.Element, topo, features=None) -> dict[str, str]:
-    """Run each feature in isolation and attach its layer to the diagram's
-    <root>. Returns {feature name: "ok" | "failed: ..."}."""
+def run_features(page: dg.Page, topo, features=None) -> dict[str, str]:
+    """Run each feature in isolation and add its layer to the page.
+    Returns {feature name: "ok" | "failed: ..."}."""
     results = {}
     for feature in (features if features is not None else enabled()):
         layer = Layer(feature)
@@ -180,7 +171,12 @@ def run_features(root: ET.Element, topo, features=None) -> dict[str, str]:
             print(f"features: '{feature.name}' failed and was skipped:\n{traceback.format_exc()}")
             results[feature.name] = f"failed: {e}"
             continue
-        layer.attach(root)
+        try:
+            layer.attach(page)
+        except ValueError as e:   # an id clash with the base diagram
+            print(f"features: '{feature.name}' failed and was skipped: {e}")
+            results[feature.name] = f"failed: {e}"
+            continue
         results[feature.name] = "ok"
-        print(f"features: '{feature.name}' added {len(layer.cells)} cell(s) on layer '{layer.label}'")
+        print(f"features: '{feature.name}' added {len(layer.items)} item(s) on layer '{layer.label}'")
     return results

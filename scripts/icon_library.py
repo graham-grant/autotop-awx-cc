@@ -2,8 +2,9 @@
 Loads a draw.io custom shape library (the .xml file you get from
 Extras > Edit Diagram on a library, or File > Open Library From >
 Device... format: <mxlibrary>[{xml, w, h, aspect, title}, ...]</mxlibrary>)
-and exposes each entry's image style by title, so renderer.py can stamp a
-device's preferred icon onto its node cell instead of the plain rectangle.
+and exposes each entry's picture by title, so renderer.py can show a
+device's preferred icon instead of the plain rectangle (IconEntry.icon()
+gives it as a diagram.Icon, for both the draw.io and the Visio writer).
 
 Each library entry's "xml" field is an HTML-entity-encoded mxGraphModel
 fragment. Simple entries are a single mxCell with
@@ -19,11 +20,14 @@ the style so "shape=image" is always present. We do NOT attempt to
 reconstruct any sibling decorative cells (outlines, bezels, etc.) - for
 multi-cell composites you'll get just the photo, not the full illustration.
 """
+import base64
 import html
 import json
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+
+import diagram
 
 
 @dataclass
@@ -32,6 +36,19 @@ class IconEntry:
     style: str    # ready-to-use mxCell style, e.g. "shape=image;...;image=data:image/svg+xml,...;"
     w: float
     h: float       # native size from the library - useful for aspect ratio, not authoritative sizing
+
+    def icon(self) -> "diagram.Icon | None":
+        """The entry's picture: the image= data URI's bytes and type, with
+        the name below it when the library style says so."""
+        m = re.search(r"image=data:(image/(?:png|svg\+xml)),([^;]+)", self.style)
+        if not m:
+            return None
+        try:
+            data = base64.b64decode(m.group(2))
+        except ValueError:
+            return None
+        return diagram.Icon(data, m.group(1),
+                            label_below="verticalLabelPosition=bottom" in self.style)
 
 
 def _find_image_cell(xml_root):

@@ -64,8 +64,8 @@ class IpsecFeature(Feature):
     SETTINGS = {
         "up_color": "#7F00FF",
         "down_color": "#CC0000",
-        "style": "curved=1;edgeStyle=none;html=1;dashed=1;dashPattern=8 4;"
-                 "endArrow=none;startArrow=none;strokeWidth=2;jumpStyle=none;",
+        "style": {"curved": True, "dashed": True, "dash": "8 4", "end_arrow": "none",
+                  "start_arrow": "none", "stroke_width": 2},
         "lane_spacing": 10.0,      # gap between converging parallel tunnels
         "converge_near": 30.0,     # parallel run starts this far from the node...
         "converge_far": 110.0,     # ...and lasts until this far out
@@ -140,7 +140,7 @@ class IpsecFeature(Feature):
                        f"{t.b} {t.b_intf or ''} ({t.b_addr}) - {'up' if t.is_up else 'down'}\n"
                        f"via {' > '.join(t.path)}")
             layer.edge(t.id, g.source, g.target,
-                       style=self.settings["style"] + f"strokeColor={color};",
+                       style={**self.settings["style"], "stroke": color},
                        points=g.points, exit=g.exit, entry=g.entry, tooltip=tooltip)
 
 

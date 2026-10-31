@@ -36,8 +36,8 @@ class RolesFeature(Feature):
             "Remote-Desktop-Services": "RDS", "FS-FileServer": "File",
         },
         "separator": " · ",
-        "style": "text;html=1;align=center;verticalAlign=middle;fontSize=8;rounded=1;"
-                 "fillColor=#E1D5E7;strokeColor=#9673A6;fontColor=#000000;spacing=1;",
+        "style": {"kind": "text", "font_size": 8, "rounded": True, "fill": "#E1D5E7",
+                  "stroke": "#9673A6", "font_color": "#000000", "spacing": 1},
         "gap": 4.0,             # below the node
     }
 

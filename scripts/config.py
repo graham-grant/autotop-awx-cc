@@ -18,9 +18,12 @@ DEFAULT_ICON_LIBRARY_PATH = _PROJECT_ROOT / "docs/Prod_Library.xml"
 DEFAULT_INVENTORY_PATH = _PROJECT_ROOT / "inventory.yml"
 DEFAULT_TEMPLATE_PATH = _PROJECT_ROOT / "template.drawio"
 
-# Also write output/topology.vsdx, a Microsoft Visio copy of the diagram
-# (scripts/vsdx.py). main.py --no-vsdx turns it off for one run.
-WRITE_VSDX = True
+# The files main.py writes into the output directory: "vsdx" for
+# topology.vsdx (Microsoft Visio, scripts/vsdx.py) and "drawio" for
+# topology.drawio (scripts/drawio.py). Each format's writer works from the
+# same diagram on its own, so either can be dropped. main.py --formats=...
+# overrides this for one run.
+OUTPUT_FORMATS = ["vsdx", "drawio"]
 
 # Fallback grid placement for a node with no position in template.drawio
 # yet (new device, or template.drawio doesn't exist at all). No layout
@@ -64,19 +67,18 @@ HANAN_AFFINITY_PENALTY = 2.5 #penalize paths that travel alone in open space. re
     #affinity_penalty = 5.0+: Strict highways. Lines will trace out long, unnatural detours just to stay perfectly parallel with completely unrelated links across the map.
 
 # ---------------------------------------------------------------------------
-# Status dot styling
+# Styles. Each is a diagram.py style dict (see the list of keys there), which
+# both the draw.io and the Visio writer understand.
 # ---------------------------------------------------------------------------
+NODE_STYLE = {"wrap": True}                 # a device without an icon
+LINK_STYLE = {"jumps": True}                # a link: hops over the links it crosses
+
+# Interface labels at each end of a link. The background is the link status
+# colour, and labels on top and bottom sides are turned to read bottom-up.
 STATUS_UP_COLOR = "#00CC00"
 STATUS_DOWN_COLOR = "#CC0000"
-STATUS_DOT_SIZE = 14
-
-# ---------------------------------------------------------------------------
-# Label styling
-# ---------------------------------------------------------------------------
-IP_LABEL_FRACTION = 0.5    # how far in from each end (0-1 along the link) the IP label sits
-INTF_LABEL_FRACTION = 0.85  # how close to each end the rotated interface-id label sits
-INTF_LABEL_STYLE = "text;html=1;align=center;verticalAlign=middle;rotation=90;fontSize=9;"
-IP_LABEL_STYLE = "labelBackgroundColor=#ffffff;fontSize=10;"
+INTF_LABEL_STYLE = {"kind": "text", "font_size": 9, "font_color": "#000000",
+                    "label_border": "#000000"}
 
 # Common Cisco/Juniper/Arista interface name abbreviations. Names that don't
 # match any of these (e.g. already-short Junos/Arista names like "ge-0/0/0"
@@ -97,7 +99,7 @@ INTF_ABBREVIATIONS = [
 # Remove "mac" to hide inferred server links, for example.
 # ---------------------------------------------------------------------------
 LINK_EVIDENCE = ("lldp", "cdp", "mac", "subnet")
-INFERRED_LINK_STYLE = "dashed=1;dashPattern=4 4;"
+INFERRED_LINK_STYLE = {"dashed": True, "dash": "4 4"}
 
 # ---------------------------------------------------------------------------
 # Shared segments: a subnet with three or more inventory members is drawn as
@@ -107,17 +109,12 @@ INFERRED_LINK_STYLE = "dashed=1;dashPattern=4 4;"
 # ---------------------------------------------------------------------------
 SEGMENT_NODE_W = 160
 SEGMENT_NODE_H = 30
-SEGMENT_NODE_STYLE = ("rounded=1;arcSize=50;whiteSpace=wrap;html=1;fontSize=10;"
-                      "fillColor=#f5f5f5;strokeColor=#666666;fontColor=#333333;")
-
-# Zero-width space: a plain "" or " " label on a drawio vertex falls back to
-# showing the cell's id instead of staying blank. U+200B isn't treated as
-# whitespace, so it survives and renders as an effectively invisible label.
-BLANK_LABEL = "\u200b"
+SEGMENT_NODE_STYLE = {"rounded": True, "arc": 50, "wrap": True, "font_size": 10,
+                      "fill": "#f5f5f5", "stroke": "#666666", "font_color": "#333333"}
 
 # ---------------------------------------------------------------------------
-# Feature plugins (scripts/features/) - drawn on their own draw.io layers
-# on top of the physical diagram. Order here = layer stacking order.
+# Feature plugins (scripts/features/) - each drawn on its own layer on top
+# of the physical diagram. Order here = layer stacking order.
 # None enables every feature module found.
 # ---------------------------------------------------------------------------
 ENABLED_FEATURES = ["ipsec", "vlans", "zones", "roles"]

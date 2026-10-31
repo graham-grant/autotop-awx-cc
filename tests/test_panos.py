@@ -287,7 +287,7 @@ class ZonesLayerTest(unittest.TestCase):
                            {"name": "dmz", "vsys": "vsys1", "interfaces": ["ethernet1/4.20"]},
                            {"name": "guest", "vsys": "vsys1", "interfaces": ["ethernet1/4.30"]}]}
         text, tip, style = ZONES.port_label(facet, "ethernet1/1")
-        self.assertEqual((text, style), ("untrust", "fillColor=#F8CECC;"))
+        self.assertEqual((text, style), ("untrust", {"fill": "#F8CECC"}))
         self.assertEqual(ZONES.port_label(facet, "ethernet1/4")[:2],
                          ("dmz, guest",
                           "ethernet1/4.20: zone dmz (vsys1); ethernet1/4.30: zone guest (vsys1)"))

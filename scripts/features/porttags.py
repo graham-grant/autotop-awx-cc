@@ -4,9 +4,9 @@ little way out from one device's end of it, saying something about that
 device's port (its VLANs, its firewall zone).
 
 A subclass sets name, label, facet and SETTINGS (with at least "offset" and
-"style"), and implements port_label(facet, port) -> (text, tooltip) or
-(text, tooltip, extra_style), or None for a port it has nothing to say
-about. Links to segment nodes aren't tagged: the segment node already
+"style", a diagram.py style dict), and implements port_label(facet, port)
+-> (text, tooltip) or (text, tooltip, extra style dict), or None for a port
+it has nothing to say about. Links to segment nodes aren't tagged: the segment node already
 names its network.
 """
 from __future__ import annotations
@@ -44,7 +44,7 @@ class PortTagFeature(Feature):
                 found = self.port_label(facet, e[f"{end}_intf"])
                 if found:
                     text, tip, *extra = found
-                    labels.append((e["id"], end, text, tip, extra[0] if extra else ""))
+                    labels.append((e["id"], end, text, tip, extra[0] if extra else {}))
         return labels
 
     def plan(self, labels, topo):
@@ -63,5 +63,5 @@ class PortTagFeature(Feature):
 
     def render(self, placed, layer):
         for local_id, x, y, text, tip, extra in placed:
-            layer.text(local_id, x, y, text, self.settings["style"] + extra,
+            layer.text(local_id, x, y, text, {**self.settings["style"], **extra},
                        w=max(40, 6 * len(text)), h=14, tooltip=tip)

@@ -34,8 +34,8 @@ class ZonesFeature(PortTagFeature):
     facet = "zones"
     SETTINGS = {
         "offset": 34.0,          # how far out along the link from the firewall's node
-        "style": "text;html=1;align=center;verticalAlign=middle;fontSize=8;rounded=1;"
-                 "fontColor=#000000;strokeColor=#666666;spacing=1;",
+        "style": {"kind": "text", "font_size": 8, "rounded": True, "font_color": "#000000",
+                  "stroke": "#666666", "spacing": 1},
         "colors": {"untrust": "#F8CECC", "trust": "#D5E8D4"},
         "palette": ["#DAE8FC", "#FFE6CC", "#E1D5E7", "#FFF2CC", "#F5F5F5", "#D0CEE2",
                     "#B1DDF0", "#FAD9D5"],
@@ -49,8 +49,8 @@ class ZonesFeature(PortTagFeature):
         return palette[zlib.crc32(zone.encode()) % len(palette)]
 
     def port_label(self, facet: dict, port: str):
-        """(label, tooltip, fill style) for one port, or None if none of its
-        interfaces is in a zone."""
+        """(label, tooltip, extra style: the zone's fill) for one port, or
+        None if none of its interfaces is in a zone."""
         found = []
         for z in facet.get("zones", []):
             for intf in z.get("interfaces", []):
@@ -62,7 +62,7 @@ class ZonesFeature(PortTagFeature):
         tip = "; ".join(f"{intf}: zone {name}" + (f" ({vsys})" if vsys else "")
                         for name, vsys, intf in found)
         fill = self.color(names[0]) if len(names) == 1 else "#FFFFFF"
-        return ", ".join(names), tip, f"fillColor={fill};"
+        return ", ".join(names), tip, {"fill": fill}
 
 
 FEATURE = ZonesFeature()

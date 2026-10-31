@@ -4,8 +4,9 @@ This project logs in to the network devices and servers in an Ansible
 inventory, collects their show-command output (over SSH for Cisco, over the
 PAN-OS XML API for Palo Alto firewalls, directly or through Panorama, and as
 fixed PowerShell scripts over OpenSSH for Windows servers), and draws a
-draw.io diagram of how they connect, with a Microsoft Visio copy of the
-same diagram alongside it.
+diagram of how they connect. The diagram is written as a Microsoft Visio
+file and as a draw.io file, each directly by its own writer, so neither
+format depends on the other (see [Output formats](#output-formats)).
 It runs as a single AWX job (or `ansible-playbook` by hand) and needs nothing
 beyond Ansible and a base Python 3.9+ install: no NAPALM, no Ansible
 collections, no PyYAML, nothing to `pip install`, and no compiler.
@@ -25,10 +26,9 @@ The diagram is built in two parts:
   coloured green or red by link status.
 - **Feature layers.** Everything else (IPsec tunnels, VLANs, firewall
   zones and server roles today; VRFs and so on later) is drawn by an independent feature plugin
-  onto its own draw.io layer. Each layer can be shown or hidden in draw.io
-  (**View > Layers**, or Ctrl+Shift+L), so a viewer turns on only what's
-  relevant to them. The Visio copy has the same layers (**Home > Layers >
-  Layer Properties**).
+  onto its own layer. Each layer can be shown or hidden (in Visio, **Home >
+  Layers > Layer Properties**; in draw.io, **View > Layers** or
+  Ctrl+Shift+L), so a viewer turns on only what's relevant to them.
 
 Contents:
 
@@ -51,7 +51,7 @@ Contents:
 | `inventory.yml` | The Ansible inventory: devices in `network_devices`, the file server in `artifact_server` |
 | `playbooks/gather_topology.yml` | The whole pipeline: collect, build, publish, audit |
 | `playbooks/group_vars/` | Credential lookups (`all.yml`) and SSH options (`network_devices.yml`) |
-| `docs/Prod_Library.xml` | draw.io shape library holding the device icons |
+| `docs/Prod_Library.xml` | The device icons, kept as a draw.io shape library file (read by `icon_library.py` for both formats) |
 | `docs/design-archive/` | Design documents, one dated folder per revision |
 | `CLAUDE.md` | Standing rules for anyone (or any assistant) changing the code |
 | `scripts/collect.py` | Logs in to one device and saves its show-command output as JSON |
@@ -68,8 +68,10 @@ Contents:
 | `scripts/drawio_position_loader.py` | Reads and writes node positions in `template.drawio` |
 | `scripts/pathfinder.py` | The link router (Hanan grid + A* search) |
 | `scripts/csrc/_hanan.c`, `scripts/_hanan.abi3.so`, `scripts/build_ext.py` | The A* search in C, its prebuilt binary, and its build script |
-| `scripts/renderer.py` | Writes nodes, links and interface labels as draw.io XML |
-| `scripts/vsdx.py` | Writes the finished draw.io diagram as a Visio file (`.vsdx`) |
+| `scripts/diagram.py` | The diagram model, independent of any file format: pages, layers, shapes, lines, labels and their styles |
+| `scripts/renderer.py` | Draws the nodes, links and interface labels into the diagram model |
+| `scripts/vsdx.py` | Writes the diagram model as a Visio file (`.vsdx`) |
+| `scripts/drawio.py` | Writes the diagram model as a draw.io file (`.drawio`) |
 | `scripts/icon_library.py` | Reads the icon library so nodes can show device pictures |
 | `scripts/features/` | Feature plugins (`ipsec.py`, `vlans.py`, `zones.py`, `roles.py`) and their shared helpers (`bundling.py`, `porttags.py`) |
 | `scripts/inventory.py`, `scripts/miniyaml.py` | Inventory reader and the small YAML parser it uses |
@@ -390,8 +392,8 @@ It runs `scripts/main.py output/facts output` and prints its output in the
 job log. The next section covers what it does.
 
 **Play 5: publish (`artifact_server`).**
-It copies `output/topology.drawio` and `output/topology.vsdx` to the
-artifact server.
+It copies `output/topology.vsdx` and `output/topology.drawio` to the
+artifact server, each one that was written.
 
 **Play 6: audit (localhost).**
 It runs `scripts/audit.py output/facts`, which re-checks every recorded
@@ -399,9 +401,9 @@ command in every facts file against the read-only policy, independently of
 the check made when it was sent, and prints one line per device. The job
 fails if any command was out of policy, refused or cancelled, if a
 configuration changed, or if a facts file has no audit record. It runs last,
-so the diagram is still published. It also fails the job if the Visio copy
-couldn't be written (see [The Visio copy](#the-visio-copy)); the draw.io
-diagram is published either way.
+so the diagram is still published. It also fails the job if either diagram
+file couldn't be written (see [Output formats](#output-formats)); the other
+one is published either way.
 
 ## Read-only collection
 
@@ -445,7 +447,7 @@ audit.
 
 ## Building the diagram, step by step
 
-`scripts/main.py` turns the JSON files into `topology.drawio` and its Visio copy:
+`scripts/main.py` turns the JSON files into `topology.vsdx` and `topology.drawio`:
 
 1. **Load.** `parser.py` reads every JSON file as a schema 2 record,
    upgrading older files (see [Device facts format](#device-facts-format)).
@@ -507,13 +509,15 @@ audit.
 4. **Route links.** `pathfinder.py` picks which side of each node every link
    leaves from and routes each link around the nodes so no two links overlap
    (see [Link routing](#link-routing)).
-5. **Render the physical diagram.** `renderer.py` writes the nodes (with
-   icons where set), the routed links and the interface labels.
+5. **Draw the physical diagram.** `renderer.py` draws the nodes (with
+   icons where set), the routed links and the interface labels into the
+   diagram model (`diagram.py`), which belongs to no file format.
 6. **Run features.** Each enabled feature draws onto its own layer (see
    [Feature layers](#feature-layers)). The log reports `ok` or the error for
    each one.
-7. **Write files.** It writes `output/topology.drawio` and its Visio copy
-   `output/topology.vsdx` (see [The Visio copy](#the-visio-copy)), then
+7. **Write files.** Each writer turns the same model into its own file:
+   `vsdx.py` writes `output/topology.vsdx` and `drawio.py` writes
+   `output/topology.drawio` (see [Output formats](#output-formats)). Then it
    rewrites `template.drawio` with every node's final position.
 
 ## Rendering features
@@ -598,8 +602,10 @@ Everything drawn on top of the physical diagram comes from a feature: one
 module in `scripts/features/`. Features are built to be added one at a time
 without disturbing each other or the base diagram:
 
-- **Own layer.** Each feature draws onto its own named draw.io layer, which
-  viewers can show, hide or lock.
+- **Own layer.** Each feature draws onto its own named layer, which
+  viewers can show, hide or lock in both Visio and draw.io.
+- **Drawn once.** A feature draws into the diagram model, not a file
+  format, so it needs no Visio or draw.io code, and both files show it.
 - **Own data.** Each feature declares the facet it draws (`facet =
   "ipsec"`) and never reads vendor output. Each platform driver says which
   commands supply that facet and parses them into the facet's shape.
@@ -611,8 +617,8 @@ without disturbing each other or the base diagram:
 - **All or nothing.** A feature's layer is added only if it finishes without
   an error. If it fails, the error is logged and that one layer is left out.
   The rest of the diagram is unaffected.
-- **No id clashes.** Every cell a feature draws has an id prefixed with the
-  feature name.
+- **No id clashes.** Every item a feature draws has an id prefixed with the
+  feature name. A clash with an existing item fails that feature.
 - **Own settings.** Each feature has a `SETTINGS` dictionary of defaults
   (colours, spacing), which can be overridden per feature in
   `config.FEATURE_SETTINGS`.
@@ -771,7 +777,12 @@ label), `separator`, `style` and `gap` (the space below the node).
    `name`, `label` (the layer name), `facet` and `SETTINGS`. Implement
    `collect`, `plan` and `render`, and end the module with
    `FEATURE = MyFeature()`. Overlays that cross routers can reuse
-   `features.bundling.plan_overlays`.
+   `features.bundling.plan_overlays`. `render` draws with
+   `layer.edge(...)` (a line between two points, or between nodes) and
+   `layer.text(...)` (a label or badge). Styles are plain dicts of the keys
+   listed in `scripts/diagram.py`, such as `{"stroke": "#0050EF",
+   "dashed": True}`; an unknown key fails the feature rather than being
+   silently dropped by one of the writers.
 4. Add the name to `config.ENABLED_FEATURES`.
 5. Add sample device output under `tests/fixtures/` and a
    `tests/test_<name>.py`.
@@ -801,35 +812,50 @@ and so on):
 4. Features need no changes: any facet the driver supplies is drawn by the
    feature that owns it.
 
-### The Visio copy
+### Output formats
 
-`scripts/vsdx.py` writes `output/topology.vsdx` for Microsoft Visio. It
-doesn't draw anything itself: it converts the finished draw.io diagram,
-after every feature has drawn its layer, so the two files always show the
-same thing and a new feature needs no Visio code.
+The diagram is drawn once, into a model that belongs to no file format
+(`scripts/diagram.py`), and each output format has its own writer:
 
-| draw.io | Visio |
-| --- | --- |
-| Page | Page with the same name, sized to fit its drawing |
-| Layer | Layer with the same name, hidden or locked as in draw.io. Unlayered shapes are on `Background` |
-| Node, label, badge | Shape at the same position and size, with the same fill, outline, rounded corners, text, font size and rotation |
-| Icon | Picture, letterboxed to the icon's shape, with the device name below it. Each distinct picture is stored once in the file |
-| Link | Line through exactly the same routed points, dashed and arrowed as in draw.io. Curved lines (IPsec tunnels) are drawn as smooth polylines |
-| Interface label, label on a link | Shape at the same point along the line |
-| Tooltip | ScreenTip (hover over the shape) |
-| Link to another page | Hyperlink to that page (Ctrl+click). A draw.io action link that also highlights shapes only opens the page in Visio |
-| Other data on a shape (tags, feature data) | Shape Data (**Data > Shape Data**) |
+| Format | File | Writer |
+| --- | --- | --- |
+| Microsoft Visio | `output/topology.vsdx` | `scripts/vsdx.py` |
+| draw.io | `output/topology.drawio` | `scripts/drawio.py` |
 
-The draw.io file stays the source of truth: node positions are still read
-from `template.drawio`, and changes made in Visio aren't read back. Links
-are plain lines, not Visio connectors glued to the shapes, so moving a node
-in Visio leaves its links where they were.
+Neither writer reads the other's output, so either format can be dropped by
+removing it from `config.OUTPUT_FORMATS` (or `--formats` on the command
+line), and later deleted with its writer, without touching the other. Visio
+is the production format; draw.io is kept for now and may be dropped later.
 
-If the conversion fails, `main.py` still writes `topology.drawio` and
-`template.drawio`, deletes any older `topology.vsdx` so a stale copy is
-never published, and exits with status 3. The playbook then publishes the
-draw.io diagram and fails the job in its last play. `--no-vsdx` (or
-`WRITE_VSDX = False` in `config.py`) skips the Visio copy.
+How the model is written in each format:
+
+| Model | Visio | draw.io |
+| --- | --- | --- |
+| Page | Page with the same name, sized to fit its drawing | Page (tab) |
+| Layer | Layer with the same name, hidden or locked as set. Base items are on `Background` | Layer, hidden or locked as set |
+| Shape (node, label, badge) | Shape with the same position, size, fill, outline, rounded corners, text, font size and rotation | Cell with the same |
+| Icon | Picture, letterboxed to the icon's shape, with the device name below it. Each distinct picture is stored once in the file | Image cell, with the picture embedded in each node that uses it |
+| Line | Line through exactly the routed points, dashed and arrowed as set. Curved lines (IPsec tunnels) are smooth polylines | Edge attached to both nodes, leaving and meeting them at the routed points, with small hops where lines cross |
+| Line label (interface names) | Shape at the same point along the line | Label riding on the edge |
+| Tooltip | ScreenTip (hover over the shape) | Tooltip |
+| Link to another page | Hyperlink to that page (Ctrl+click). A link that also highlights items only opens the page | Link that opens the page and highlights the tagged items |
+| Tags, feature data | Shape Data (**Data > Shape Data**) | Cell data (**Edit Data**) |
+
+The Visio writer follows the order the Visio file format requires for the
+parts of each shape (cells, then sections, then text, then embedded
+pictures) and writes the window settings part Visio expects. LibreOffice
+and draw.io accept files that get these wrong, but Visio refuses them, so
+`tests/test_vsdx.py` checks every shape against that order.
+
+Node positions are still read from `template.drawio`, edited in draw.io, and
+changes made in either output file aren't read back. In Visio, links are
+plain lines, not connectors glued to the shapes, so moving a node in Visio
+leaves its links where they were.
+
+If a writer fails, `main.py` deletes any older copy of its file so a stale
+one is never published, still writes the other formats and
+`template.drawio`, and exits with status 3. The playbook then publishes the
+files that were written and fails the job in its last play.
 
 ## Configuration reference
 
@@ -839,9 +865,10 @@ All settings live in `scripts/config.py`:
 | --- | --- |
 | `DEFAULT_FACTS_DIR`, `DEFAULT_OUTPUT_DIR` | Where JSON is read from and the diagram is written to |
 | `DEFAULT_INVENTORY_PATH`, `DEFAULT_TEMPLATE_PATH`, `DEFAULT_ICON_LIBRARY_PATH` | Inventory, position template and icon library |
-| `WRITE_VSDX` | Also write `topology.vsdx`, the Visio copy (default `True`) |
+| `OUTPUT_FORMATS` | The files to write: `vsdx` (`topology.vsdx`) and `drawio` (`topology.drawio`). Default both |
 | `EXCLUDED_NETWORKS` | Subnets never drawn as links, including any smaller subnet inside them |
 | `LINK_EVIDENCE` | Which kinds of evidence may draw a link: `lldp`, `cdp`, `mac`, `subnet` |
+| `NODE_STYLE`, `LINK_STYLE` | Style of device nodes and links (style dicts, see `scripts/diagram.py`) |
 | `INFERRED_LINK_STYLE` | Style added to links found only from a MAC address table (dashed) |
 | `NEW_NODE_GRID_*` | Layout of the staging grid for new devices. `NEW_NODE_GRID_MIN_GAP` is the least space left between staged nodes; the grid spreads out to keep it |
 | `DEFAULT_NODE_W`, `DEFAULT_NODE_H` | Node size when the inventory doesn't set `w` / `h` |
@@ -855,19 +882,21 @@ All settings live in `scripts/config.py`:
 `main.py` also takes these on the command line:
 
 ```bash
-python3 scripts/main.py [facts_dir] [output_dir] [--inventory=PATH] [--template=PATH] [--icon-library=PATH] [--reparse] [--no-vsdx]
+python3 scripts/main.py [facts_dir] [output_dir] [--inventory=PATH] [--template=PATH] [--icon-library=PATH] [--reparse] [--formats=vsdx,drawio]
 ```
 
 `--reparse` re-parses each facts file's raw output with the current drivers
-before drawing. `--no-vsdx` skips the Visio copy for this run.
+before drawing. `--formats` picks the files to write for this run,
+overriding `OUTPUT_FORMATS`: `--formats=vsdx` writes only the Visio file
+(and removes an older `topology.drawio` from the output folder).
 
 ## Running it
 
 **In AWX:** create a job template for `playbooks/gather_topology.yml` with
 the project's `inventory.yml` as its inventory, and attach a Network
 credential (plus the Palo Alto and Windows credentials, if those use their
-own accounts). When the job finishes, the diagram (`topology.drawio` and
-`topology.vsdx`) is at the path on the artifact server that the publish
+own accounts). When the job finishes, the diagram (`topology.vsdx` and
+`topology.drawio`) is at the path on the artifact server that the publish
 play copies it to, and the raw JSON is
 alongside it under `output/facts/`. The stock AWX execution environment is
 enough, since everything the job needs is standard Python and the OpenSSH
@@ -887,8 +916,8 @@ contacting any device:
 python3 scripts/main.py output/facts output
 ```
 
-Open `output/topology.drawio` in draw.io (desktop, web, or the VS Code
-extension), or `output/topology.vsdx` in Visio.
+Open `output/topology.vsdx` in Visio, or `output/topology.drawio` in
+draw.io (desktop, web, or the VS Code extension).
 
 ## The C extension
 
@@ -936,8 +965,10 @@ collapse and the VLANs layer, the PAN-OS driver, XML API sessions
 (directly, through Panorama, and over HTTPS with certificate checks),
 the zones layer, a mixed Cisco and Palo Alto diagram, the Windows driver,
 PowerShell session and roles layer, a teamed server placed by a switch's
-MAC table, the Visio copy (package structure, positions, layers, links,
-tooltips and icons, and, if LibreOffice is installed, that it opens), and
+MAC table, the diagram model, the Visio writer (package structure, the
+part order Visio requires, positions, layers, links, tooltips and icons,
+that it doesn't use the draw.io writer, and, if LibreOffice is installed,
+that it opens), the draw.io writer, choosing output formats, and
 the read-only safeguards, for the SSH, API and PowerShell policies. `tests/fixtures/windows/` holds a Windows server's script output,
 which `tests/fake_winssh.py` serves as a fake OpenSSH server: it decodes
 the script it is sent and logs it, so the tests check that the server
@@ -989,16 +1020,16 @@ configuration change fails the host.
   switch port, so the "more than one inventory device on the port" rule
   leaves them to subnet evidence.
 - The IPsec path is the fewest-hops guess unless an explicit path is given.
-- The Visio copy has been checked by opening it in LibreOffice, not yet in
-  Visio itself. In it, links aren't glued to nodes, draw.io's small hops
-  where links cross aren't drawn, HTML formatting inside a label (bold, a
-  table) becomes plain text, and an icon that isn't a PNG, or an SVG
+- In the Visio file, links aren't glued to nodes, the small hops where
+  links cross aren't drawn, and an icon that isn't a PNG, or an SVG
   wrapping one, is drawn as a plain box. Every icon in
   `docs/Prod_Library.xml` converts.
+- Node positions live in `template.drawio`, so moving nodes still means
+  editing that file in draw.io.
 
 ### Scaling to hundreds of devices
 
-draw.io itself copes with diagrams this size. Cell counts in the low
+Visio and draw.io both cope with diagrams this size. Item counts in the low
 thousands open and pan normally, and layers keep feature data out of the
 way until it's wanted. Two parts of this project need work before a
 production run of hundreds of devices:
@@ -1006,8 +1037,8 @@ production run of hundreds of devices:
 - **Icon size.** Each icon in `docs/Prod_Library.xml` is 90 to 350 KB, and
   every node that uses one carries its own copy. Without icons, the diagram
   is about 2 KB per device, so 400 devices make an 0.8 MB file. With icons
-  on all 400, the same diagram would be 60 to 140 MB, which draw.io handles
-  badly. (The Visio copy doesn't have this problem: it stores each distinct
+  on all 400, the draw.io file would be 60 to 140 MB, which draw.io handles
+  badly. (The Visio file doesn't have this problem: it stores each distinct
   picture once.) The fix is smaller icons (simplified SVGs of a few KB each) or
   referencing each image once instead of embedding it per node.
 - **Routing time.** Routing time grows with the square of the number of
@@ -1025,15 +1056,15 @@ production run of hundreds of devices:
 
 Production is currently one site of a few hundred devices with no site
 mapping, so for now the work is on keeping one large page fast and small
-(the icon fix above). If draw.io's limits are reached, the way to scale is
-to split the network across draw.io pages (the tabs along the bottom), one
+(the icon fix above). If one page gets too big, the way to scale is
+to split the network across pages (the tabs along the bottom), one
 per site, region or segment, plus an overview page with one node per site. Each page is routed separately, which keeps routing fast
 and each page readable. Layers then hold the detail within a page: VLANs,
 VRFs, tunnels, firewall zones.
 
-If even that outgrows draw.io, the collected JSON doesn't depend on it.
-Another renderer, such as an interactive web view with search and
-filtering, could be added alongside draw.io and read the same files.
+The collected JSON and the diagram model don't depend on either file
+format. Another writer, such as an interactive web view with search and
+filtering, could be added alongside the Visio and draw.io writers.
 
 ## Design history
 

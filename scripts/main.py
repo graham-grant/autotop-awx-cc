@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-Build a drawio topology diagram from the per-host JSON files written by
-playbooks/gather_topology.yml.
+Build the topology diagram, as a Microsoft Visio file and a draw.io file,
+from the per-host JSON files written by playbooks/gather_topology.yml.
 
 This is the coordinator: load data (parser.py), decide node positions and
-route every link through the Hanan-grid A* engine (pathfinder.py), then
-emit draw.io XML with IP/interface labels and status dots (renderer.py),
-then let each enabled protocol feature (features/ - e.g. IPsec tunnels)
-draw itself onto its own layer. Tunable settings live in config.py.
+route every link through the Hanan-grid A* engine (pathfinder.py), draw
+the nodes, links and interface labels into a format-independent diagram
+(renderer.py, diagram.py), let each enabled protocol feature (features/ -
+e.g. IPsec tunnels) draw itself onto its own layer, then write the diagram
+with each output format's own writer: vsdx.py (topology.vsdx) and
+drawio.py (topology.drawio). Neither writer reads the other's file.
+Tunable settings live in config.py.
 
 Runs on a base Python 3 install: no third-party packages. Host JSON is a
 schema 2 record per device (drivers/; older files are upgraded on load,
@@ -40,7 +43,7 @@ reposition it by hand once.
 
 Usage:
     python3 main.py [facts_dir] [output_dir] [--inventory=PATH] [--template=PATH]
-                    [--icon-library=PATH] [--reparse] [--no-vsdx]
+                    [--icon-library=PATH] [--reparse] [--formats=vsdx,drawio]
 
 Defaults: facts_dir=output/facts, output_dir=output,
 inventory=<project root>/inventory.yml, template=<project root>/template.drawio,
@@ -52,14 +55,13 @@ every host under it) - the value must match an entry's title in the icon
 library exactly, e.g. icon: "C9200-24P Front". A host with no icon set
 falls back to the plain rectangle.
 
-The same diagram is also written as topology.vsdx for Microsoft Visio
-(vsdx.py converts the finished draw.io document: same pages, layers,
-positions, tooltips and page links). --no-vsdx, or config.WRITE_VSDX =
-False, skips it. If only the Visio file fails, topology.drawio and
-template.drawio are still written and the exit status is 3.
+--formats (default config.OUTPUT_FORMATS) picks the files written:
+"vsdx" for topology.vsdx, "drawio" for topology.drawio. An output file of
+a format that isn't picked is deleted, so an old one is never mistaken for
+this run's. If a writer fails, its file is deleted, the other formats and
+template.drawio are still written, and the exit status is 3.
 """
 import sys
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import config
@@ -70,10 +72,17 @@ import pathfinder
 import renderer
 import icon_library
 import inventory
+import drawio
 import drawio_position_loader as dpl
 import vsdx
 
-EXIT_VSDX_FAILED = 3
+EXIT_OUTPUT_FAILED = 3
+
+# format name -> (file name, writer). Each writer takes (diagram, path).
+WRITERS = {
+    "vsdx": ("topology.vsdx", vsdx.write),
+    "drawio": ("topology.drawio", drawio.write),
+}
 
 
 def _parse_path_arg(argv, flag, default):
@@ -207,37 +216,20 @@ def main():
 
     icons_by_id = parser.load_icons(inventory_path)
     icon_lib = icon_library.load_icon_library(icon_library_path)
-    mxfile = renderer.render_tree(hanan_nodes, specs, edges_by_id, icons_by_id, icon_lib,
-                                  segments)
+    diagram = renderer.build(hanan_nodes, specs, edges_by_id, icons_by_id, icon_lib, segments)
 
-    # Protocol features (features/), each on its own draw.io layer above the
+    # Protocol features (features/), each on its own layer above the
     # physical diagram. A feature that fails is reported and left out.
     topo = Topology(nodes, edges, hanan_nodes, specs, segments)
-    feature_results = features.run_features(mxfile.find(".//root"), topo)
-    xml_str = ET.tostring(mxfile, encoding="unicode")
+    feature_results = features.run_features(diagram.pages[0], topo)
 
-    Path(out_dir).mkdir(parents=True, exist_ok=True)
-    out_path = Path(out_dir) / "topology.drawio"
-    out_path.write_text(xml_str)
     seg_note = f" and {len(segments)} shared segment(s)" if segments else ""
-    print(f"\nWrote {len(nodes)} nodes{seg_note} and {len(edges)} links to {out_path}")
+    print(f"\nDrew {len(nodes)} nodes{seg_note} and {len(edges)} links")
     for name, status in feature_results.items():
         print(f"  feature {name}: {status}")
 
-    vsdx_failed = False
-    vsdx_path = Path(out_dir) / "topology.vsdx"
-    if config.WRITE_VSDX and "--no-vsdx" not in argv:
-        try:
-            counts = vsdx.write(mxfile, vsdx_path)
-            print(f"Wrote Visio copy to {vsdx_path} ({counts['pages']} page(s), "
-                  f"{counts['shapes']} shapes, {counts['images']} image(s))")
-        except Exception as e:  # report it, but keep the draw.io output
-            vsdx_failed = True
-            vsdx_path.unlink(missing_ok=True)   # never leave a stale or partial file
-            print(f"ERROR: Visio output failed, no {vsdx_path.name} written: "
-                  f"{type(e).__name__}: {e}")
-    else:
-        vsdx_path.unlink(missing_ok=True)   # don't leave an older run's copy behind
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    failed = write_outputs(diagram, out_dir, _formats(argv))
 
     # Regenerate template.drawio from this run's final node positions/sizes,
     # so it always matches the current inventory and carries forward
@@ -246,8 +238,40 @@ def main():
     template_xml = dpl.build_template_xml(final_positions, preferred_sides)
     Path(template_path).write_text(template_xml)
     print(f"Wrote position template to {template_path}")
-    if vsdx_failed:
-        sys.exit(EXIT_VSDX_FAILED)
+    if failed:
+        sys.exit(EXIT_OUTPUT_FAILED)
+
+
+def _formats(argv) -> list:
+    value = next((a.split("=", 1)[1] for a in argv if a.startswith("--formats=")), None)
+    formats = ([f.strip() for f in value.split(",") if f.strip()] if value is not None
+               else list(config.OUTPUT_FORMATS))
+    unknown = [f for f in formats if f not in WRITERS]
+    if unknown:
+        sys.exit(f"Unknown output format(s): {', '.join(unknown)} "
+                 f"(choose from {', '.join(WRITERS)})")
+    return formats
+
+
+def write_outputs(diagram, out_dir, formats) -> list:
+    """Write the diagram in each format. Each writer is independent: one
+    that fails is reported and its file deleted (never a stale or partial
+    file), and the rest are still written. Returns the formats that failed."""
+    failed = []
+    for fmt, (name, writer) in WRITERS.items():
+        path = Path(out_dir) / name
+        if fmt not in formats:
+            path.unlink(missing_ok=True)   # don't leave an older run's file behind
+            continue
+        try:
+            writer(diagram, path)
+        except Exception as e:
+            failed.append(fmt)
+            path.unlink(missing_ok=True)
+            print(f"ERROR: {name} couldn't be written: {type(e).__name__}: {e}")
+            continue
+        print(f"Wrote {path}")
+    return failed
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ from features.context import Topology
 from features.ipsec import FEATURE as IPSEC
 from drivers.ios import parse_crypto_session as parse_ios_crypto_session
 from features import Layer
+import drawio
 
 # Same layout as fixtures/template.drawio: hq on top, core1/core2 in the
 # middle, three branches along the bottom.
@@ -130,8 +131,7 @@ class MixedVendorTest(unittest.TestCase):
     def test_drawn_between_the_two_nodes(self):
         layer = Layer(IPSEC)
         IPSEC.render(IPSEC.plan(IPSEC.collect(self.topo), self.topo), layer)
-        ends = {frozenset((c.find("mxCell").get("source"), c.find("mxCell").get("target")))
-                for c in layer.cells}
+        ends = {frozenset((line.source, line.target)) for line in layer.items}
         self.assertIn(frozenset(("hq", "branch1")), ends)
 
     def test_cisco_driver_normalises_status(self):
@@ -198,13 +198,15 @@ class IpsecGeometryTest(unittest.TestCase):
     def test_render_style(self):
         layer = Layer(IPSEC)
         IPSEC.render(self.plan, layer)
-        self.assertEqual(len(layer.cells), 3)
-        for wrapper in layer.cells:
-            style = wrapper.find("mxCell").get("style")
+        self.assertEqual(len(layer.items), 3)
+        for line in layer.items:
+            self.assertTrue(line.style["curved"] and line.style["dashed"])
+            self.assertIsNotNone(line.exit)
+            self.assertIn("IPsec", line.tooltip)
+            # and in draw.io's terms
+            style = drawio.style_string(line)
             self.assertIn("curved=1", style)
             self.assertIn("dashed=1", style)
-            self.assertIn("exitX=", style)
-            self.assertIn("IPsec", wrapper.get("tooltip"))
 
 
 if __name__ == "__main__":

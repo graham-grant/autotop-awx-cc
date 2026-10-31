@@ -1,7 +1,7 @@
 import unittest
-import xml.etree.ElementTree as ET
 
 import support  # noqa: F401
+import diagram as dg
 import features
 from features import Feature
 from test_ipsec import fixture_topology
@@ -28,7 +28,7 @@ class HalfDone(Feature):
         return None
 
     def render(self, plan, layer):
-        layer.edge("x", "hq", "core1", "dashed=1;")
+        layer.edge("x", "hq", "core1", {"dashed": True})
         raise ValueError("late failure")
 
 
@@ -41,42 +41,55 @@ class Counter(Feature):
 
     def render(self, plan, layer):
         self.seen = plan
-        layer.edge("e", "hq", "core1", "", points=[(1, 2)])
+        layer.edge("e", "hq", "core1", {}, points=[(1, 2)])
 
 
-def empty_root():
-    root = ET.Element("root")
-    ET.SubElement(root, "mxCell", id="0")
-    ET.SubElement(root, "mxCell", id="1", parent="0")
-    return root
+def empty_page():
+    return dg.Page("p", "Topology")
 
 
 class FeatureIsolationTest(unittest.TestCase):
     def test_failures_are_contained(self):
         topo = fixture_topology()
-        root = empty_root()
+        page = empty_page()
         counter = Counter()
-        results = features.run_features(root, topo, [Exploding(), HalfDone(), counter])
+        results = features.run_features(page, topo, [Exploding(), HalfDone(), counter])
         self.assertTrue(results["exploding"].startswith("failed"))
         self.assertTrue(results["halfdone"].startswith("failed"))
         self.assertEqual(results["counter"], "ok")
         self.assertEqual(counter.seen, (6, 5))   # untouched by Exploding
-        ids = [c.get("id") for c in root]
-        self.assertEqual(ids, ["0", "1", "layer-counter", "counter-e"])
+        self.assertEqual([lay.id for lay in page.layers], ["layer-counter"])
+        self.assertEqual([i.id for i in page.items], ["counter-e"])
         self.assertEqual(len(topo.hosts), 6)     # the shared original too
 
     def test_layer_cells_parented_to_own_layer(self):
-        root = empty_root()
-        features.run_features(root, fixture_topology(), [Counter()])
-        layer = root.find("mxCell[@id='layer-counter']")
-        self.assertEqual(layer.get("parent"), "0")
-        self.assertEqual(root.find("mxCell[@id='counter-e']").get("parent"), "layer-counter")
+        page = empty_page()
+        features.run_features(page, fixture_topology(), [Counter()])
+        (layer,) = page.layers
+        self.assertEqual((layer.id, layer.name), ("layer-counter", "Counter"))
+        self.assertEqual(page.get("counter-e").layer, "layer-counter")
+
+    def test_id_clash_with_the_page_skips_the_feature(self):
+        page = empty_page()
+        page.add(dg.Shape("counter-e"))
+        results = features.run_features(page, fixture_topology(), [Counter()])
+        self.assertTrue(results["counter"].startswith("failed"))
+        self.assertEqual(page.layers, [])
+
+    def test_unknown_style_key_fails_the_feature(self):
+        class Typo(Counter):
+            name = "typo"
+
+            def render(self, plan, layer):
+                layer.edge("e", "hq", "core1", {"colour": "#FF0000"})
+        results = features.run_features(empty_page(), fixture_topology(), [Typo()])
+        self.assertIn("colour", results["typo"])
 
     def test_duplicate_cell_ids_rejected(self):
         layer = features.Layer(Counter())
-        layer.edge("a", "hq", "core1", "")
+        layer.edge("a", "hq", "core1", {})
         with self.assertRaises(ValueError):
-            layer.edge("a", "hq", "core1", "")
+            layer.edge("a", "hq", "core1", {})
 
     def test_discovery_and_commands(self):
         import commands

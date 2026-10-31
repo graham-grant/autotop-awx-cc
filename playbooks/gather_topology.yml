@@ -7,10 +7,11 @@
 # scripts over OpenSSH for Windows servers. It writes one JSON file per host to
 # output/facts/: the common device format (schema 2), parsed by the
 # platform's driver (scripts/drivers/), with the raw output kept.
-# scripts/main.py reads those files and draws the drawio diagram, with
-# links found from LLDP/CDP, MAC tables and shared subnets (see
-# scripts/links.py), and writes the same diagram as a Visio file
-# (topology.vsdx, scripts/vsdx.py). Both are copied to the artifact server.
+# scripts/main.py reads those files and draws the diagram, with links
+# found from LLDP/CDP, MAC tables and shared subnets (see scripts/links.py),
+# and writes it as a Microsoft Visio file (topology.vsdx) and a draw.io file
+# (topology.drawio), each by its own writer. Both are copied to the
+# artifact server.
 #
 # Which commands get run is decided by scripts/commands.py: the core
 # commands the platform's driver needs, plus the commands behind each facet
@@ -140,7 +141,7 @@
         dest: /home/hp/Projects/autotop-awx/output/facts/
         mode: "0755"
 
-- name: Build the diagram (draw.io and Visio) and publish it as a job artifact
+- name: Build the diagram (Visio and draw.io) and publish it as a job artifact
   hosts: localhost
   connection: local
   gather_facts: no
@@ -151,14 +152,15 @@
         {{ playbook_dir }}/../output/facts
         {{ playbook_dir }}/../output
       register: build_result
-      # 3: only the Visio copy failed. topology.drawio is still published,
-      # and the last play fails the job.
+      # 3: one output format couldn't be written. The others are still
+      # published, and the last play fails the job.
       failed_when: build_result.rc not in [0, 3]
 
-    - name: Check for the Visio copy
+    - name: Check which diagram files were written
       stat:
-        path: "{{ playbook_dir }}/../output/topology.vsdx"
-      register: vsdx_file
+        path: "{{ playbook_dir }}/../output/{{ item }}"
+      loop: [topology.vsdx, topology.drawio]
+      register: diagram_files
 
     - name: Show build script output in the job log
       debug:
@@ -168,16 +170,16 @@
   hosts: artifact_server
   gather_facts: no
   tasks:
-    - name: Copy topology.drawio to artifact server
+    # topology.vsdx (Visio) and topology.drawio, whichever were written
+    # (config.OUTPUT_FORMATS picks them)
+    - name: Copy the diagram files to artifact server
       ansible.builtin.copy:
-        src: "{{ playbook_dir }}/../output/topology.drawio"
-        dest: /home/hp/Projects/autotop-awx/topology.drawio
-
-    - name: Copy topology.vsdx (the Visio copy) to artifact server
-      ansible.builtin.copy:
-        src: "{{ playbook_dir }}/../output/topology.vsdx"
-        dest: /home/hp/Projects/autotop-awx/topology.vsdx
-      when: hostvars['localhost'].vsdx_file.stat.exists
+        src: "{{ item.stat.path }}"
+        dest: "/home/hp/Projects/autotop-awx/{{ item.item }}"
+      loop: "{{ hostvars['localhost'].diagram_files.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: item.stat.exists
 
 - name: Verify every command sent was read-only
   hosts: localhost
@@ -205,8 +207,8 @@
         fail_msg: "Read-only audit failed - see the audit output above."
         quiet: true
 
-    - name: Fail the job if the Visio copy couldn't be written
+    - name: Fail the job if a diagram file couldn't be written
       assert:
         that: build_result.rc == 0
-        fail_msg: "topology.drawio was published, but topology.vsdx failed - see the build output above."
+        fail_msg: "A diagram file couldn't be written (the others were published) - see the build output above."
         quiet: true
