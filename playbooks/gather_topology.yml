@@ -2,8 +2,9 @@
 # Gathers show-command output from every host in the `network_devices`
 # group (scripts/collect.py - stdlib Python only; no NAPALM, no network
 # collections, nothing to pip install): over SSH with the system ssh client
-# for Cisco, and over the PAN-OS XML API (HTTPS) for Palo Alto firewalls,
-# directly or through Panorama. It writes one JSON file per host to
+# for Cisco, over the PAN-OS XML API (HTTPS) for Palo Alto firewalls,
+# directly or through Panorama, and as fixed, hash-checked PowerShell
+# scripts over OpenSSH for Windows servers. It writes one JSON file per host to
 # output/facts/: the common device format (schema 2), parsed by the
 # platform's driver (scripts/drivers/), with the raw output kept.
 # scripts/main.py reads those files and draws the drawio diagram, with
@@ -76,21 +77,27 @@
   vars:
     ansible_python_interpreter: "{{ ansible_playbook_python }}"
   tasks:
+    # Firewalls and Windows servers can have their own account
+    # (PANOS_* / WINDOWS_*); without one they use the Network credential.
     - name: Check device credentials were provided
       assert:
-        that:
-          - net_username | length > 0
-          - net_password | length > 0
+        that: >-
+          (net_username | length > 0 and net_password | length > 0)
+          or (ansible_network_os == 'panos'
+              and panos_username | length > 0 and panos_password | length > 0)
+          or (ansible_network_os in ['windows', 'win']
+              and windows_username | length > 0 and windows_password | length > 0)
         fail_msg: >-
-          No device credentials in the job environment. In AWX, attach a
-          credential of the built-in "Network" type to this job template
-          (it sets ANSIBLE_NET_USERNAME / ANSIBLE_NET_PASSWORD). Running by
-          hand: export NET_USERNAME and NET_PASSWORD.
+          No device credentials in the job environment for this host. In
+          AWX, attach a credential of the built-in "Network" type to this
+          job template (it sets ANSIBLE_NET_USERNAME / ANSIBLE_NET_PASSWORD),
+          or the Palo Alto / Windows credential type for those hosts.
+          Running by hand: export NET_USERNAME and NET_PASSWORD.
         quiet: true
-      run_once: true
 
-    # SSH for Cisco, the XML API for PAN-OS (the driver decides). The
-    # panos_* variables only apply to firewalls: see inventory.yml.
+    # SSH for Cisco, the XML API for PAN-OS, PowerShell over SSH for
+    # Windows (the driver decides). The panos_* variables only apply to
+    # firewalls: see inventory.yml.
     - name: Collect show-command output
       command: >-
         python3 {{ playbook_dir }}/../scripts/collect.py
@@ -111,6 +118,8 @@
         NET_ENABLE_PASSWORD: "{{ net_enable_password }}"
         PANOS_USERNAME: "{{ panos_username }}"
         PANOS_PASSWORD: "{{ panos_password }}"
+        WINDOWS_USERNAME: "{{ windows_username }}"
+        WINDOWS_PASSWORD: "{{ windows_password }}"
       register: collect_result
       changed_when: false
 

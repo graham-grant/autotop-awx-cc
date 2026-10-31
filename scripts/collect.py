@@ -16,6 +16,10 @@ connects depends on the platform driver's TRANSPORT:
            type=keygen, then sends each request. Directly to the firewall,
            or with --panorama to Panorama, which proxies each request to the
            firewall named by --serial (looked up by hostname if not given).
+  powershell-ssh
+           sshcli.PowerShellSession (Windows OpenSSH): runs each fixed
+           PowerShell script in scripts/drivers/powershell/ as
+           -EncodedCommand, one connection per script.
 
 Credentials come from the environment, never the command line, first
 match wins:
@@ -25,7 +29,8 @@ match wins:
              the device lands at a ">" prompt)
 ANSIBLE_NET_* are what AWX's built-in "Network" credential type injects.
 PAN-OS hosts use PANOS_USERNAME / PANOS_PASSWORD instead when those are
-set, so firewalls can have their own (read-only) account.
+set, and Windows hosts WINDOWS_USERNAME / WINDOWS_PASSWORD, so firewalls
+and servers can have their own (read-only) accounts.
 
 Read-only: collection must never change a device. Before connecting, every
 command in the plan is checked against the platform's policy
@@ -61,14 +66,17 @@ from commands import commands
 import drivers
 import readonly
 import xmlapi
-from sshcli import AuthError, CliError, CliSession
+from sshcli import AuthError, CliError, CliSession, PowerShellSession
 
 
 USERNAME_VARS = ("NET_USERNAME", "ANSIBLE_NET_USERNAME", "NAPALM_USERNAME")
 PASSWORD_VARS = ("NET_PASSWORD", "ANSIBLE_NET_PASSWORD", "NAPALM_PASSWORD")
 ENABLE_VARS = ("NET_ENABLE_PASSWORD", "ANSIBLE_NET_AUTH_PASS")
-PANOS_USERNAME_VARS = ("PANOS_USERNAME",)
-PANOS_PASSWORD_VARS = ("PANOS_PASSWORD",)
+# Per-transport accounts, preferred over the NET_* ones when set
+TRANSPORT_CREDENTIALS = {
+    "xml-api": (("PANOS_USERNAME",), ("PANOS_PASSWORD",)),
+    "powershell-ssh": (("WINDOWS_USERNAME",), ("WINDOWS_PASSWORD",)),
+}
 
 
 def _env(*names):
@@ -118,11 +126,9 @@ def _config_marker(session, command, platform):
 def _session(name, host, platform, port, ssh_args, timeout, command_timeout, policy,
              panorama, serial, verify_tls, ca_file, scheme):
     log = lambda line: print(f"{name}: {line}")  # noqa: E731
-    if drivers.transport(platform) == "xml-api":
-        username = _env(*PANOS_USERNAME_VARS) or _env(*USERNAME_VARS)
-        password = _env(*PANOS_PASSWORD_VARS) or _env(*PASSWORD_VARS)
-    else:
-        username, password = _env(*USERNAME_VARS), _env(*PASSWORD_VARS)
+    user_vars, pass_vars = TRANSPORT_CREDENTIALS.get(drivers.transport(platform), ((), ()))
+    username = _env(*user_vars) or _env(*USERNAME_VARS)
+    password = _env(*pass_vars) or _env(*PASSWORD_VARS)
     if not username or not password:
         raise CliError("no credentials found in the environment. In AWX, attach a "
                        "'Network' credential to the job template; otherwise set "
@@ -137,6 +143,11 @@ def _session(name, host, platform, port, ssh_args, timeout, command_timeout, pol
                                  timeout=timeout, command_timeout=command_timeout,
                                  scheme=scheme, log=log)
     port = port or 22
+    if drivers.transport(platform) == "powershell-ssh":
+        print(f"{name}: running PowerShell over SSH on {host}:{port} as {username!r}")
+        return PowerShellSession(host, username, password, port=port,
+                                 ssh_args=list(ssh_args), timeout=timeout,
+                                 command_timeout=command_timeout, policy=policy, log=log)
     print(f"{name}: connecting to {host}:{port} as {username!r}")
     return CliSession(host, username, password, port=port,
                       enable_password=_env(*ENABLE_VARS),
@@ -265,6 +276,10 @@ def print_plan(platform: str):
     if drivers.transport(platform) == "xml-api":
         print(f"All {len(steps)} requests pass the read-only policy. The login "
               "credentials and API key go in the request body, and nothing else is sent.")
+    elif drivers.transport(platform) == "powershell-ssh":
+        print(f"All {len(steps)} scripts pass the read-only policy (every command in them "
+              "checked). Each is sent as -EncodedCommand, one SSH connection per script; "
+              "only the password is typed.")
     else:
         print(f"All {len(steps)} commands pass the read-only policy. Login answers, "
               "'enable' and 'exit' are the only other input sent.")

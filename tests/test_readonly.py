@@ -114,10 +114,54 @@ PANOS_REFUSED = [
     "show system info", "configure", "commit", "",
 ]
 
+WINDOWS_REFUSED_COMMANDS = [
+    "powershell:../evil.ps1", "powershell:nope.ps1", "powershell:windows_core.ps1 ",
+    "powershell:windows_core.ps1#sha256=" + "0" * 64, "powershell:WINDOWS_CORE.PS1",
+    "Get-NetAdapter", "powershell -EncodedCommand AAAA", "",
+]
+
+# Script text that must never pass, whatever the file it's in
+WINDOWS_REFUSED_SCRIPTS = [
+    "Remove-Item x", "rm x", "del x", "gci", "iex 'x'", "Invoke-Expression 'x'",
+    "Start-Process cmd", "Stop-Computer", "Restart-Computer", "Set-NetAdapter -Name x",
+    "Get-NetAdapter | Disable-NetAdapter", "Get-NetAdapter; Restart-Computer",
+    "Get-CimInstance -ClassName Win32_Process | Invoke-CimMethod -MethodName Terminate",
+    "Get-NetAdapter | ForEach-Object Disable", "Get-NetAdapter | ForEach-Object -MemberName Disable",
+    "Get-NetAdapter | Where-Object Name -eq x", "Get-NetAdapter | ForEach-Object { $_ | Disable-NetAdapter }",
+    "Get-NetAdapter -Name (Stop-Computer)", "Get-NetAdapter -Name @(Stop-Computer)",
+    "Get-NetAdapter , Stop-Computer", "@{ a = Stop-Computer }", "if ($x) { Stop-Service x }",
+    "& 'Remove-Item' x", "$a = 'x'; & $a", ". x", ". .\\evil.ps1",
+    "$x = Get-NetAdapter; $x.Disable()", "(Get-NetAdapter).Disable()", "$a.b = 1",
+    "[System.IO.File]::WriteAllText('a','b')", "[IO.File]", "[scriptblock]",
+    'Get-NetAdapter "$(Remove-Item x)"', "$(Stop-Computer)", "${function:x}",
+    "$function:x = 'y'", "Get-NetAdapter > C:\\out.txt", "Get-NetAdapter 2>&1",
+    "Get-NetAdapter`\n| Disable-NetAdapter", "@'\nx\n'@", "<# x #> Get-NetAdapter",
+    "function Get-NetAdapter { Stop-Computer }", "$s = { Stop-Computer }",
+    "(Stop-Computer)", "Get-NetAdapter )", "{ Get-NetAdapter",
+]
+
 
 class PolicyTest(unittest.TestCase):
     def setUp(self):
         self.ios = readonly.policy_for("ios")
+
+    def test_windows_scripts_allowed(self):
+        policy = readonly.policy_for("windows")
+        for command in drivers.core_commands("windows") + drivers.facet_commands("windows"):
+            with self.subTest(command=command):
+                self.assertEqual(policy.check(command), command)
+
+    def test_windows_refused_commands(self):
+        policy = readonly.policy_for("windows")
+        for command in WINDOWS_REFUSED_COMMANDS:
+            with self.subTest(command=command), self.assertRaises(readonly.CommandRefused):
+                policy.check(command)
+
+    def test_windows_refused_scripts(self):
+        policy = readonly.policy_for("windows")
+        for text in WINDOWS_REFUSED_SCRIPTS:
+            with self.subTest(script=text), self.assertRaises(readonly.CommandRefused):
+                policy.check_script(text)
 
     def test_panos_allowed(self):
         policy = readonly.policy_for("panos")

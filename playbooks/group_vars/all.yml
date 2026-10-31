@@ -20,3 +20,10 @@ net_enable_password: "{{ lookup('env', 'NET_ENABLE_PASSWORD') or lookup('env', '
 # (see the README).
 panos_username: "{{ lookup('env', 'PANOS_USERNAME') }}"
 panos_password: "{{ lookup('env', 'PANOS_PASSWORD') }}"
+
+# Optional: the account for Windows servers (a domain or local account that
+# can log in over OpenSSH; see the README). Unset, servers use the
+# credentials above. In AWX these come from a custom credential type that
+# injects WINDOWS_USERNAME / WINDOWS_PASSWORD.
+windows_username: "{{ lookup('env', 'WINDOWS_USERNAME') }}"
+windows_password: "{{ lookup('env', 'WINDOWS_PASSWORD') }}"
