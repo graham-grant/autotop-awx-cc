@@ -40,7 +40,7 @@ reposition it by hand once.
 
 Usage:
     python3 main.py [facts_dir] [output_dir] [--inventory=PATH] [--template=PATH]
-                    [--icon-library=PATH] [--reparse]
+                    [--icon-library=PATH] [--reparse] [--no-vsdx]
 
 Defaults: facts_dir=output/facts, output_dir=output,
 inventory=<project root>/inventory.yml, template=<project root>/template.drawio,
@@ -51,6 +51,12 @@ in inventory.yml (or a `vars: {icon: ...}` block on a group, inherited by
 every host under it) - the value must match an entry's title in the icon
 library exactly, e.g. icon: "C9200-24P Front". A host with no icon set
 falls back to the plain rectangle.
+
+The same diagram is also written as topology.vsdx for Microsoft Visio
+(vsdx.py converts the finished draw.io document: same pages, layers,
+positions, tooltips and page links). --no-vsdx, or config.WRITE_VSDX =
+False, skips it. If only the Visio file fails, topology.drawio and
+template.drawio are still written and the exit status is 3.
 """
 import sys
 import xml.etree.ElementTree as ET
@@ -65,6 +71,9 @@ import renderer
 import icon_library
 import inventory
 import drawio_position_loader as dpl
+import vsdx
+
+EXIT_VSDX_FAILED = 3
 
 
 def _parse_path_arg(argv, flag, default):
@@ -215,6 +224,21 @@ def main():
     for name, status in feature_results.items():
         print(f"  feature {name}: {status}")
 
+    vsdx_failed = False
+    vsdx_path = Path(out_dir) / "topology.vsdx"
+    if config.WRITE_VSDX and "--no-vsdx" not in argv:
+        try:
+            counts = vsdx.write(mxfile, vsdx_path)
+            print(f"Wrote Visio copy to {vsdx_path} ({counts['pages']} page(s), "
+                  f"{counts['shapes']} shapes, {counts['images']} image(s))")
+        except Exception as e:  # report it, but keep the draw.io output
+            vsdx_failed = True
+            vsdx_path.unlink(missing_ok=True)   # never leave a stale or partial file
+            print(f"ERROR: Visio output failed, no {vsdx_path.name} written: "
+                  f"{type(e).__name__}: {e}")
+    else:
+        vsdx_path.unlink(missing_ok=True)   # don't leave an older run's copy behind
+
     # Regenerate template.drawio from this run's final node positions/sizes,
     # so it always matches the current inventory and carries forward
     # whatever position/side each node already had.
@@ -222,6 +246,8 @@ def main():
     template_xml = dpl.build_template_xml(final_positions, preferred_sides)
     Path(template_path).write_text(template_xml)
     print(f"Wrote position template to {template_path}")
+    if vsdx_failed:
+        sys.exit(EXIT_VSDX_FAILED)
 
 
 if __name__ == "__main__":

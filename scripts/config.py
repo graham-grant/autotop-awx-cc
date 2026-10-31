@@ -18,6 +18,10 @@ DEFAULT_ICON_LIBRARY_PATH = _PROJECT_ROOT / "docs/Prod_Library.xml"
 DEFAULT_INVENTORY_PATH = _PROJECT_ROOT / "inventory.yml"
 DEFAULT_TEMPLATE_PATH = _PROJECT_ROOT / "template.drawio"
 
+# Also write output/topology.vsdx, a Microsoft Visio copy of the diagram
+# (scripts/vsdx.py). main.py --no-vsdx turns it off for one run.
+WRITE_VSDX = True
+
 # Fallback grid placement for a node with no position in template.drawio
 # yet (new device, or template.drawio doesn't exist at all). No layout
 # library involved - just a staging area below whatever's already pinned,

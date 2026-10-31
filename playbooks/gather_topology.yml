@@ -9,7 +9,8 @@
 # platform's driver (scripts/drivers/), with the raw output kept.
 # scripts/main.py reads those files and draws the drawio diagram, with
 # links found from LLDP/CDP, MAC tables and shared subnets (see
-# scripts/links.py).
+# scripts/links.py), and writes the same diagram as a Visio file
+# (topology.vsdx, scripts/vsdx.py). Both are copied to the artifact server.
 #
 # Which commands get run is decided by scripts/commands.py: the core
 # commands the platform's driver needs, plus the commands behind each facet
@@ -139,7 +140,7 @@
         dest: /home/hp/Projects/autotop-awx/output/facts/
         mode: "0755"
 
-- name: Build the drawio diagram and publish it as a job artifact
+- name: Build the diagram (draw.io and Visio) and publish it as a job artifact
   hosts: localhost
   connection: local
   gather_facts: no
@@ -150,6 +151,14 @@
         {{ playbook_dir }}/../output/facts
         {{ playbook_dir }}/../output
       register: build_result
+      # 3: only the Visio copy failed. topology.drawio is still published,
+      # and the last play fails the job.
+      failed_when: build_result.rc not in [0, 3]
+
+    - name: Check for the Visio copy
+      stat:
+        path: "{{ playbook_dir }}/../output/topology.vsdx"
+      register: vsdx_file
 
     - name: Show build script output in the job log
       debug:
@@ -163,6 +172,12 @@
       ansible.builtin.copy:
         src: "{{ playbook_dir }}/../output/topology.drawio"
         dest: /home/hp/Projects/autotop-awx/topology.drawio
+
+    - name: Copy topology.vsdx (the Visio copy) to artifact server
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../output/topology.vsdx"
+        dest: /home/hp/Projects/autotop-awx/topology.vsdx
+      when: hostvars['localhost'].vsdx_file.stat.exists
 
 - name: Verify every command sent was read-only
   hosts: localhost
@@ -188,4 +203,10 @@
       assert:
         that: audit_result.rc == 0
         fail_msg: "Read-only audit failed - see the audit output above."
+        quiet: true
+
+    - name: Fail the job if the Visio copy couldn't be written
+      assert:
+        that: build_result.rc == 0
+        fail_msg: "topology.drawio was published, but topology.vsdx failed - see the build output above."
         quiet: true
