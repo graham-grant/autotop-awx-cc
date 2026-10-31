@@ -34,7 +34,9 @@ it ("some parts are missing or invalid"); in particular each shape's
 children must come in order - Cells, Sections, Text, ForeignData.
 
 Visio's y axis points up and its unit is the inch; the Diagram's y axis
-points down, and PX_PER_INCH pixels make an inch. Lines are drawn as shapes
+points down, and PX_PER_INCH pixels make an inch. Each page records where
+its top-left corner sits in diagram pixels (User.OriginX / User.OriginY in
+its page sheet), so positions.py can read shape positions back. Lines are drawn as shapes
 through their points, not as connectors glued to the shapes, so Visio
 never reroutes them; line hops at crossings aren't drawn.
 """
@@ -126,6 +128,14 @@ class _PageWriter:
         self.min_x, self.min_y = min_x, min_y
         self.width = (max_x - min_x) / PX_PER_INCH + 2 * MARGIN_IN
         self.height = (max_y - min_y) / PX_PER_INCH + 2 * MARGIN_IN
+
+    @property
+    def origin_x(self):
+        return float(self.min_x - MARGIN_IN * PX_PER_INCH)
+
+    @property
+    def origin_y(self):
+        return float(self.min_y - MARGIN_IN * PX_PER_INCH)
 
     def X(self, x):
         return (x - self.min_x) / PX_PER_INCH + MARGIN_IN
@@ -390,6 +400,11 @@ def _page_sheet(writer: _PageWriter, layers: list[dict]) -> str:
            _c("PageLockReplace", 0), _c("PageLockDuplicate", 0), _c("UIVisibility", 0),
            _c("ShdwType", 0), _c("ShdwObliqueAngle", 0), _c("ShdwScaleFactor", 1),
            _c("PrintPageOrientation", 2 if writer.width > writer.height else 1)]
+    # Where the page's top-left corner sits in diagram pixels, so a reader
+    # (positions.py) can turn shape positions back into diagram coordinates
+    out.append('<Section N="User">' + "".join(
+        f'<Row N="{n}">' + _c("Value", v) + _c("Prompt", "") + "</Row>"
+        for n, v in (("OriginX", writer.origin_x), ("OriginY", writer.origin_y))) + "</Section>")
     if layers:
         out.append('<Section N="Layer">')
         for i, lay in enumerate(layers):

@@ -23,17 +23,16 @@ the device reports is grouped by network, and any subnet shared by exactly two
 inventory hosts becomes a link between them. A subnet shared by three or
 more hosts becomes a small segment node linked to each of them.
 
-Node positions are no longer kept in a YAML config - they're read straight
-out of template.drawio (drawio_position_loader.py), a stripped-down
-companion file containing just one rectangle per inventory host, no links
-or labels. Reposition nodes by opening that file, dragging them around,
-and saving - the next run picks the new positions straight up. A node can
-also get a preferred attachment side (top/bottom/left/right), overriding
-the automatic per-link choice, by adding a custom "side"
-property to it in draw.io (right-click -> Edit Style, or the Edit Data
-panel) - this round-trips the same way positions do.
+Node positions are read from the position template, template.vsdx
+(positions.py): a Visio file with one shape per node and no links or
+labels. Reposition nodes by opening it in Visio, dragging them around, and
+saving - the next run picks the new positions straight up. A node can also
+get a preferred attachment side (top/bottom/left/right), overriding the
+automatic per-link choice, in its "Side" Shape Data field - this
+round-trips the same way positions do. An older template.drawio next to it
+is read once, if template.vsdx doesn't exist yet.
 
-template.drawio itself is regenerated every run to match whatever's
+The template itself is regenerated every run to match whatever's
 currently in inventory.yml: existing nodes keep whatever position you last
 left them at, new nodes appear in a simple staging grid below the rest,
 ready to be dragged into place. There's no positioning library involved
@@ -46,7 +45,7 @@ Usage:
                     [--icon-library=PATH] [--reparse] [--formats=vsdx,drawio]
 
 Defaults: facts_dir=output/facts, output_dir=output,
-inventory=<project root>/inventory.yml, template=<project root>/template.drawio,
+inventory=<project root>/inventory.yml, template=<project root>/template.vsdx,
 icon-library=<project root>/docs/Prod_Library.xml
 
 Each host can get a preferred icon by adding an `icon:` key to its entry
@@ -59,7 +58,8 @@ falls back to the plain rectangle.
 "vsdx" for topology.vsdx, "drawio" for topology.drawio. An output file of
 a format that isn't picked is deleted, so an old one is never mistaken for
 this run's. If a writer fails, its file is deleted, the other formats and
-template.drawio are still written, and the exit status is 3.
+the template are still written, and the exit status is 3. If the template
+can't be written, the old one is left as it was and the exit status is 3.
 """
 import sys
 from pathlib import Path
@@ -73,7 +73,7 @@ import renderer
 import icon_library
 import inventory
 import drawio
-import drawio_position_loader as dpl
+import positions
 import vsdx
 
 EXIT_OUTPUT_FAILED = 3
@@ -94,7 +94,7 @@ def _parse_path_arg(argv, flag, default):
 
 def _place_unpinned_nodes(pinned, unpinned_names, sizes=None):
     """Simple staging-grid placement for any node with no position in
-    template.drawio yet. No layout library involved - just somewhere
+    the position template yet. No layout library involved - just somewhere
     visible below whatever's already pinned, meant to be dragged into
     place by hand on the next pass rather than auto-arranged well.
 
@@ -188,7 +188,7 @@ def main():
     node_names = [n["device"]["name"] for n in nodes]
     segment_ids = [s["id"] for s in segments]
 
-    pinned = dpl.load_pinned_positions_from_drawio(template_path, inventory_path)
+    pinned = positions.load(template_path, inventory_path)
     pinned = {k: v for k, v in pinned.items()  # drop segments that no longer exist
               if not k.startswith(parser.SEGMENT_PREFIX) or k in segment_ids}
 
@@ -198,7 +198,7 @@ def main():
     unpinned = [name for name in node_names if name not in pinned]
     new_positions = _place_unpinned_nodes(pinned, unpinned, sizes) if unpinned else {}
     if unpinned:
-        print(f"Note: {len(unpinned)} node(s) have no position in template.drawio yet, "
+        print(f"Note: {len(unpinned)} node(s) have no position in the template yet, "
               f"placed in a staging grid: {', '.join(unpinned)}")
 
     centers = {}
@@ -231,13 +231,18 @@ def main():
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     failed = write_outputs(diagram, out_dir, _formats(argv))
 
-    # Regenerate template.drawio from this run's final node positions/sizes,
-    # so it always matches the current inventory and carries forward
-    # whatever position/side each node already had.
-    final_positions = {n.id: (n.x, n.y, n.w, n.h) for n in hanan_nodes}
-    template_xml = dpl.build_template_xml(final_positions, preferred_sides)
-    Path(template_path).write_text(template_xml)
-    print(f"Wrote position template to {template_path}")
+    # Regenerate the position template from this run's final node
+    # positions/sizes, so it always matches the current inventory and
+    # carries forward whatever position/side each node already had.
+    page = diagram.pages[0]
+    try:
+        written = positions.write_template(template_path, [page.get(n.id) for n in hanan_nodes],
+                                           preferred_sides)
+        print(f"Wrote position template to {written}")
+    except Exception as e:  # noqa: BLE001 - keep the old template, report, exit 3
+        print(f"ERROR: the position template couldn't be written "
+              f"({positions.output_path(template_path)} is unchanged): {e}")
+        failed.append("template")
     if failed:
         sys.exit(EXIT_OUTPUT_FAILED)
 

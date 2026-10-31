@@ -330,8 +330,8 @@ class OutputsTest(unittest.TestCase):
     """main.py writes topology.vsdx and topology.drawio, each on its own."""
 
     def run_main(self, tmp, *extra):
-        template = Path(tmp) / "template.drawio"
-        shutil.copy(support.FIXTURES / "template.drawio", template)
+        template = Path(tmp) / "template.vsdx"
+        shutil.copy(support.FIXTURES / "template.vsdx", template)
         argv = ["main.py", str(support.FACTS), tmp, f"--inventory={support.FIXTURES / 'inventory.yml'}",
                 f"--template={template}", *extra]
         with mock.patch.object(sys, "argv", argv), redirect_stdout(io.StringIO()) as out:
@@ -386,7 +386,7 @@ class OutputsTest(unittest.TestCase):
                 self.assertIn(f"{name} couldn't be written", out)
                 self.assertFalse((Path(tmp) / name).exists())
                 self.assertTrue((Path(tmp) / kept).exists())
-                self.assertTrue((Path(tmp) / "template.drawio").exists())
+                self.assertTrue((Path(tmp) / "template.vsdx").exists())
 
 
 @unittest.skipUnless(shutil.which("soffice"), "LibreOffice not installed")

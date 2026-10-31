@@ -2,8 +2,8 @@
 Reads the per-host facts files written by the playbook (schema 2, see
 drivers/__init__.py; older files are upgraded on load) and derives links
 with links.py (LLDP/CDP, MAC tables, shared subnets). Nothing here knows
-about drawio, pathfinding, or rendering. Node positions are read from template.drawio by
-drawio_position_loader.py.
+about file formats, pathfinding, or rendering. Node positions are read from the
+position template by positions.py.
 """
 import json
 from pathlib import Path

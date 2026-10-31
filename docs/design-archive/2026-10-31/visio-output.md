@@ -1,6 +1,6 @@
 # Visio output
 
-Created 2026-10-31 · Status: implemented. The converter's samples open in Microsoft Visio (checked by Jon); a check of the direct writer's sample in Visio is pending
+Created 2026-10-31 · Status: implemented. The direct writer's files open in Microsoft Visio and draw.io with the same topology (checked by Jon). Node positions moved to a Visio template the same day
 
 ## Requirement
 
@@ -120,15 +120,44 @@ rounded corners (LibreOffice ignores `Rounding`, so arcs are drawn), the
 arrowhead index for the default arrow, and the default font size (12 px).
 
 Jon opened the converter's fixed samples (see [History](#history)) in
-Microsoft Visio, and they open and display correctly. The direct writer
-writes the same parts in the same order, and its sample is waiting for the
-same check.
+Microsoft Visio, and they open and display correctly. He then opened the
+direct writer's sample in both Visio and draw.io: both open, with the same
+topology.
+
+## Position template in Visio
+
+Node positions used to live in `template.drawio`, edited in draw.io. Once
+the direct writer was confirmed, Jon asked for that template to be a Visio
+file too, so arranging the diagram needs no draw.io either.
+
+- `scripts/positions.py` writes `template.vsdx` with the Visio writer: one
+  page, "Positions", with each node's shape (same position, size, style and
+  icon) and its name as the text. No links or labels.
+- Each shape has a **Side** Shape Data field (empty, or left / right / top
+  / bottom), replacing draw.io's custom `side` property.
+- Every page the Visio writer makes records where its top-left corner sits
+  in diagram pixels, as `User.OriginX` / `User.OriginY` in the page sheet.
+  Reading turns `PinX`/`PinY` (inches, y up) back into diagram pixels with
+  those and `PageHeight`, so positions round-trip exactly (to 0.01 px). A
+  file without them reads with the corner at 0, 0; and if Visio grows the
+  page, every node shifts by the same amount, which changes nothing in the
+  layout.
+- Shapes are matched by their text, as draw.io labels were, so a name that
+  isn't an inventory host or a segment stops the run. The reader allows
+  for what Visio does on save: formulas next to values, `LocPin` off
+  centre, text split by `<cp>` runs, shapes inside groups (offset by the
+  group's corner), and a Shape Data row renamed but still labelled Side.
+- The template is written to a temporary file and then moved over the old
+  one, so a failure leaves the old positions intact (and the run exits 3).
+- Upgrade: with no `template.vsdx` yet, a `template.drawio` beside it is
+  read once (the old loader, kept only for this), and `template.vsdx` is
+  written at the end of the run.
 
 ## Failure handling
 
 If one writer raises, `main.py` deletes any older copy of its file so a
 stale one is never published, prints the error, still writes the other
-formats and `template.drawio`, and exits with status 3. The playbook accepts
+formats and `template.vsdx`, and exits with status 3. The playbook accepts
 status 3 for the build, publishes the files that exist, and fails the job
 in its last play, after the read-only audit.
 
@@ -144,14 +173,23 @@ so the converter was replaced by the model and two writers described above.
 
 ## Open points
 
-- **Positions still come from draw.io.** `template.drawio` holds node
-  positions and is edited in draw.io. If draw.io is dropped, positions need
-  another home: reading them from a `template.vsdx` arranged in Visio, or a
-  plain positions file.
 - **Icon library format.** `docs/Prod_Library.xml` is a draw.io library
-  file. The code only reads the pictures from it, so it could become a
-  folder of PNGs, or a Visio stencil the team prefers, without touching the
-  writers.
+  file; the code only reads the pictures from it. Other sources, and what
+  each would mean for each writer:
+  - PNG files: both writers draw them as they do now.
+  - SVG files: draw.io draws them natively. The Visio writer only handles
+    an SVG that wraps one PNG; any other SVG is a plain box, since the
+    standard library can't rasterise it. Embedding the SVG itself in the
+    `.vsdx` (newer Visio versions support SVG pictures) would need a check
+    in Visio.
+  - Visio stencils (`.vssx`): the Visio writer would copy each master into
+    the document and place instances of it, so Visio shows the real
+    stencil shape. draw.io has no use for a Visio master, so the draw.io
+    file would show the master's embedded picture if it has one, and a
+    plain box otherwise.
+- **Dropping draw.io.** Remove `drawio` from `OUTPUT_FORMATS`, then delete
+  `scripts/drawio.py`, `scripts/drawio_position_loader.py` (once every
+  template has been upgraded) and their tests.
 - **HTML tables.** The VRF design draws each routing table as one HTML-table
   shape in draw.io. The model has no tables, so the VRF work will draw one
   shape per row (or per cell), which both writers handle.

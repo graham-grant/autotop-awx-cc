@@ -11,12 +11,12 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 DEFAULT_FACTS_DIR = "output/facts"
 DEFAULT_OUTPUT_DIR = "output"
-# inventory.yml and template.drawio live at the project root, one level up
+# inventory.yml and template.vsdx live at the project root, one level up
 # from scripts/ - sibling to the playbooks/ directory.
 _PROJECT_ROOT = Path(__file__).parent.parent
 DEFAULT_ICON_LIBRARY_PATH = _PROJECT_ROOT / "docs/Prod_Library.xml"
 DEFAULT_INVENTORY_PATH = _PROJECT_ROOT / "inventory.yml"
-DEFAULT_TEMPLATE_PATH = _PROJECT_ROOT / "template.drawio"
+DEFAULT_TEMPLATE_PATH = _PROJECT_ROOT / "template.vsdx"
 
 # The files main.py writes into the output directory: "vsdx" for
 # topology.vsdx (Microsoft Visio, scripts/vsdx.py) and "drawio" for
@@ -25,8 +25,8 @@ DEFAULT_TEMPLATE_PATH = _PROJECT_ROOT / "template.drawio"
 # overrides this for one run.
 OUTPUT_FORMATS = ["vsdx", "drawio"]
 
-# Fallback grid placement for a node with no position in template.drawio
-# yet (new device, or template.drawio doesn't exist at all). No layout
+# Fallback grid placement for a node with no position in template.vsdx
+# yet (new device, or template.vsdx doesn't exist at all). No layout
 # library involved - just a staging area below whatever's already pinned,
 # so a new node is visible somewhere reasonable and easy to drag into
 # place, rather than literally requiring a layout algorithm to guess.
@@ -104,7 +104,7 @@ INFERRED_LINK_STYLE = {"dashed": True, "dash": "4 4"}
 # ---------------------------------------------------------------------------
 # Shared segments: a subnet with three or more inventory members is drawn as
 # a small node of its own, linked to each member, instead of a full mesh.
-# Its position can be pinned in template.drawio like any node (its label
+# Its position can be pinned in template.vsdx like any node (its text
 # there starts with "segment "); otherwise it's placed between its members.
 # ---------------------------------------------------------------------------
 SEGMENT_NODE_W = 160

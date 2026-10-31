@@ -65,7 +65,8 @@ Contents:
 | `scripts/main.py` | Entry point for building the diagram |
 | `scripts/parser.py` | Loads the JSON files as schema 2 records |
 | `scripts/links.py` | Works out the links from LLDP/CDP, MAC tables and shared subnets |
-| `scripts/drawio_position_loader.py` | Reads and writes node positions in `template.drawio` |
+| `scripts/positions.py` | Reads and writes node positions in the position template, `template.vsdx` |
+| `scripts/drawio_position_loader.py` | Reads an older `template.drawio` once, to carry its positions over to `template.vsdx` |
 | `scripts/pathfinder.py` | The link router (Hanan grid + A* search) |
 | `scripts/csrc/_hanan.c`, `scripts/_hanan.abi3.so`, `scripts/build_ext.py` | The A* search in C, its prebuilt binary, and its build script |
 | `scripts/diagram.py` | The diagram model, independent of any file format: pages, layers, shapes, lines, labels and their styles |
@@ -501,7 +502,7 @@ audit.
      ignored, because they only mean something on one device: a PE's
      customer VRF and the CE's global table share a /30 and must still be
      linked.
-3. **Place nodes.** Positions come from `template.drawio` at the project
+3. **Place nodes.** Positions come from `template.vsdx` at the project
    root (see [Node positions](#node-positions)). Devices that aren't in it
    yet are put in a staging grid below the rest. A segment node that isn't
    in it yet is put between its members, moved down until it overlaps
@@ -518,7 +519,7 @@ audit.
 7. **Write files.** Each writer turns the same model into its own file:
    `vsdx.py` writes `output/topology.vsdx` and `drawio.py` writes
    `output/topology.drawio` (see [Output formats](#output-formats)). Then it
-   rewrites `template.drawio` with every node's final position.
+   rewrites `template.vsdx` with every node's final position.
 
 ## Rendering features
 
@@ -538,22 +539,32 @@ and the rectangle is used.
 
 #### Node positions
 
-Node positions are kept in `template.drawio` at the project root, a
-stripped-down diagram with one rectangle per device and nothing else.
-To move nodes, open that file in draw.io, drag them, and save. The next run
-uses the new positions. Each run rewrites the file to match the inventory:
-existing nodes keep their positions, and new devices appear in the staging
-grid, ready to be dragged into place. Every node label in it must match an
-inventory host, so a typo stops the run instead of silently dropping a node.
-The exception is shared-segment nodes, whose labels start with `segment `
-(for example `segment 10.20.0.0/24`). They come from the facts rather than
-the inventory, can be dragged like any node, and are dropped from the
-template when the segment no longer exists.
+Node positions are kept in `template.vsdx` at the project root, a
+stripped-down Visio diagram with one shape per device (showing its icon, if
+it has one) and nothing else. To move nodes, open that file in Visio, drag
+them, and save. The next run uses the new positions. Each run rewrites the
+file to match the inventory: existing nodes keep their positions, and new
+devices appear in the staging grid, ready to be dragged into place. If the
+file can't be written, the old one is left as it was. Shapes are matched by
+their text, which must be an inventory host, so a typo stops the run
+instead of silently dropping a node, and any other shape with text (a note
+or title) has to be left out of the file. The exception is shared-segment
+nodes, whose text starts with `segment ` (for example
+`segment 10.20.0.0/24`). They come from the facts rather than the
+inventory, can be dragged like any node, and are dropped from the template
+when the segment no longer exists. Grouping shapes is fine; resizing does
+nothing, since node sizes come from the inventory.
 
-To force the side of a node that its links attach to, add a custom property
-named `side` with the value `top`, `bottom`, `left` or `right` to that node in
-`template.drawio` (right-click > **Edit Data**). Every link of that node then
-attaches to that side. Without one, the side is chosen per link: if the two
+Upgrading from `template.drawio`: if there's no `template.vsdx` yet but a
+`template.drawio` sits next to where it would be, the first run reads the
+positions (and sides) from it and writes `template.vsdx`. After that the
+`.drawio` file isn't read and can be deleted. `--template=PATH.drawio` works
+the same way and writes `PATH.vsdx`.
+
+To force the side of a node that its links attach to, set the node's
+**Side** field to `top`, `bottom`, `left` or `right` in `template.vsdx`
+(right-click the shape > **Data > Shape Data**). Every link of that node then
+attaches to that side. An empty Side leaves the choice to the router. Without one, the side is chosen per link: if the two
 nodes' centres are within 40 pixels of each other vertically (the same row),
 the link leaves the right side of the left-hand node and enters the left side
 of the other. Otherwise it leaves the bottom of the upper node and enters the
@@ -847,14 +858,15 @@ pictures) and writes the window settings part Visio expects. LibreOffice
 and draw.io accept files that get these wrong, but Visio refuses them, so
 `tests/test_vsdx.py` checks every shape against that order.
 
-Node positions are still read from `template.drawio`, edited in draw.io, and
-changes made in either output file aren't read back. In Visio, links are
+Node positions are read from `template.vsdx` (see
+[Node positions](#node-positions)); changes made in either output file
+aren't read back. In Visio, links are
 plain lines, not connectors glued to the shapes, so moving a node in Visio
 leaves its links where they were.
 
 If a writer fails, `main.py` deletes any older copy of its file so a stale
 one is never published, still writes the other formats and
-`template.drawio`, and exits with status 3. The playbook then publishes the
+`template.vsdx`, and exits with status 3. The playbook then publishes the
 files that were written and fails the job in its last play.
 
 ## Configuration reference
@@ -968,7 +980,10 @@ PowerShell session and roles layer, a teamed server placed by a switch's
 MAC table, the diagram model, the Visio writer (package structure, the
 part order Visio requires, positions, layers, links, tooltips and icons,
 that it doesn't use the draw.io writer, and, if LibreOffice is installed,
-that it opens), the draw.io writer, choosing output formats, and
+that it opens), the draw.io writer, choosing output formats, the position
+template (exact round trip, moves and Side set as in Visio, grouped and
+off-centre shapes, upgrading from `template.drawio`, and keeping the old
+template if writing fails), and
 the read-only safeguards, for the SSH, API and PowerShell policies. `tests/fixtures/windows/` holds a Windows server's script output,
 which `tests/fake_winssh.py` serves as a fake OpenSSH server: it decodes
 the script it is sent and logs it, so the tests check that the server
@@ -1024,8 +1039,6 @@ configuration change fails the host.
   links cross aren't drawn, and an icon that isn't a PNG, or an SVG
   wrapping one, is drawn as a plain box. Every icon in
   `docs/Prod_Library.xml` converts.
-- Node positions live in `template.drawio`, so moving nodes still means
-  editing that file in draw.io.
 
 ### Scaling to hundreds of devices
 

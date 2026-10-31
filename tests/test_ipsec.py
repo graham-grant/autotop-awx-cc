@@ -11,7 +11,7 @@ from drivers.ios import parse_crypto_session as parse_ios_crypto_session
 from features import Layer
 import drawio
 
-# Same layout as fixtures/template.drawio: hq on top, core1/core2 in the
+# Same layout as fixtures/template.vsdx: hq on top, core1/core2 in the
 # middle, three branches along the bottom.
 LAYOUT = {
     "hq": (285, 0), "core1": (285, 200), "core2": (685, 200),
