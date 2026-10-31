@@ -51,7 +51,7 @@ Contents:
 | `inventory.yml` | The Ansible inventory: devices in `network_devices`, the file server in `artifact_server` |
 | `playbooks/gather_topology.yml` | The whole pipeline: collect, build, publish, audit |
 | `playbooks/group_vars/` | Credential lookups (`all.yml`) and SSH options (`network_devices.yml`) |
-| `docs/Prod_Library.xml` | The device icons, kept as a draw.io shape library file (read by `icon_library.py` for both formats) |
+| `icons/` | The device icons, one PNG file per icon |
 | `docs/design-archive/` | Design documents, one dated folder per revision |
 | `CLAUDE.md` | Standing rules for anyone (or any assistant) changing the code |
 | `scripts/collect.py` | Logs in to one device and saves its show-command output as JSON |
@@ -73,7 +73,7 @@ Contents:
 | `scripts/renderer.py` | Draws the nodes, links and interface labels into the diagram model |
 | `scripts/vsdx.py` | Writes the diagram model as a Visio file (`.vsdx`) |
 | `scripts/drawio.py` | Writes the diagram model as a draw.io file (`.drawio`) |
-| `scripts/icon_library.py` | Reads the icon library so nodes can show device pictures |
+| `scripts/icon_library.py` | Reads the icon folder so nodes can show device pictures, and exports a draw.io shape library into it |
 | `scripts/features/` | Feature plugins (`ipsec.py`, `vlans.py`, `zones.py`, `roles.py`) and their shared helpers (`bundling.py`, `porttags.py`) |
 | `scripts/inventory.py`, `scripts/miniyaml.py` | Inventory reader and the small YAML parser it uses |
 | `scripts/config.py` | All tunable settings |
@@ -93,7 +93,7 @@ all:
         core-rtr1:
           ansible_host: 10.0.0.1
           ansible_network_os: ios     # ios / iosxe, or panos / windows (below)
-          icon: "ASR1004 Front"       # optional: a title from docs/Prod_Library.xml
+          icon: "ASR1004 Front"       # optional: a PNG in icons/ (icons/ASR1004 Front.png)
           w: 230                      # optional node size
           h: 42
       children:
@@ -531,11 +531,25 @@ commands.
 #### Nodes and icons
 
 Each device is a node labelled with its inventory name. If the host has an
-`icon` in the inventory, the node shows that picture from
-`docs/Prod_Library.xml`. The value must match an entry's title in the
-library exactly, such as `"C9200-24P Front"`. A host with no icon is drawn
-as a plain rounded rectangle. If an icon name isn't found, the log says so
-and the rectangle is used.
+`icon` in the inventory, the node shows that picture from the `icons/`
+folder at the project root: the value names a PNG file there, with or
+without `.png`, so `"C9200-24P Front"` shows `icons/C9200-24P Front.png`.
+The picture is fitted into the node's box (its `w` and `h`) without
+stretching, with the device name below it, in both the Visio and the
+draw.io file. A host with no icon is drawn as a plain rounded rectangle.
+If an icon isn't found, the log says so and the rectangle is used.
+
+To add an icon, put a PNG in `icons/`. A transparent background and a few
+hundred pixels across is plenty. Icons used to live in a draw.io shape
+library (`docs/Prod_Library.xml`); its seven pictures are now in `icons/`,
+byte for byte. To bring over the pictures from another draw.io library:
+
+```bash
+python3 scripts/icon_library.py export MyLibrary.xml icons
+```
+
+That writes each entry as `icons/<title>.png`. An entry whose picture isn't
+a PNG, or an SVG wrapping one, is reported and skipped.
 
 #### Node positions
 
@@ -876,7 +890,7 @@ All settings live in `scripts/config.py`:
 | Setting | Purpose |
 | --- | --- |
 | `DEFAULT_FACTS_DIR`, `DEFAULT_OUTPUT_DIR` | Where JSON is read from and the diagram is written to |
-| `DEFAULT_INVENTORY_PATH`, `DEFAULT_TEMPLATE_PATH`, `DEFAULT_ICON_LIBRARY_PATH` | Inventory, position template and icon library |
+| `DEFAULT_INVENTORY_PATH`, `DEFAULT_TEMPLATE_PATH`, `DEFAULT_ICON_DIR` | Inventory, position template and icon folder |
 | `OUTPUT_FORMATS` | The files to write: `vsdx` (`topology.vsdx`) and `drawio` (`topology.drawio`). Default both |
 | `EXCLUDED_NETWORKS` | Subnets never drawn as links, including any smaller subnet inside them |
 | `LINK_EVIDENCE` | Which kinds of evidence may draw a link: `lldp`, `cdp`, `mac`, `subnet` |
@@ -894,7 +908,7 @@ All settings live in `scripts/config.py`:
 `main.py` also takes these on the command line:
 
 ```bash
-python3 scripts/main.py [facts_dir] [output_dir] [--inventory=PATH] [--template=PATH] [--icon-library=PATH] [--reparse] [--formats=vsdx,drawio]
+python3 scripts/main.py [facts_dir] [output_dir] [--inventory=PATH] [--template=PATH] [--icons=DIR] [--reparse] [--formats=vsdx,drawio]
 ```
 
 `--reparse` re-parses each facts file's raw output with the current drivers
@@ -983,7 +997,8 @@ that it doesn't use the draw.io writer, and, if LibreOffice is installed,
 that it opens), the draw.io writer, choosing output formats, the position
 template (exact round trip, moves and Side set as in Visio, grouped and
 off-centre shapes, upgrading from `template.drawio`, and keeping the old
-template if writing fails), and
+template if writing fails), the icon folder (and exporting a draw.io
+library into it), and
 the read-only safeguards, for the SSH, API and PowerShell policies. `tests/fixtures/windows/` holds a Windows server's script output,
 which `tests/fake_winssh.py` serves as a fake OpenSSH server: it decodes
 the script it is sent and logs it, so the tests check that the server
@@ -1036,9 +1051,8 @@ configuration change fails the host.
   leaves them to subnet evidence.
 - The IPsec path is the fewest-hops guess unless an explicit path is given.
 - In the Visio file, links aren't glued to nodes, the small hops where
-  links cross aren't drawn, and an icon that isn't a PNG, or an SVG
-  wrapping one, is drawn as a plain box. Every icon in
-  `docs/Prod_Library.xml` converts.
+  links cross aren't drawn.
+- Icons are PNG pictures, not Visio stencil masters.
 
 ### Scaling to hundreds of devices
 
@@ -1047,13 +1061,13 @@ thousands open and pan normally, and layers keep feature data out of the
 way until it's wanted. Two parts of this project need work before a
 production run of hundreds of devices:
 
-- **Icon size.** Each icon in `docs/Prod_Library.xml` is 90 to 350 KB, and
-  every node that uses one carries its own copy. Without icons, the diagram
+- **Icon size.** Each icon in `icons/` is 35 to 200 KB, and in the draw.io
+  file every node that uses one carries its own copy. Without icons, the diagram
   is about 2 KB per device, so 400 devices make an 0.8 MB file. With icons
   on all 400, the draw.io file would be 60 to 140 MB, which draw.io handles
   badly. (The Visio file doesn't have this problem: it stores each distinct
-  picture once.) The fix is smaller icons (simplified SVGs of a few KB each) or
-  referencing each image once instead of embedding it per node.
+  picture once.) The fix is smaller PNGs (a few KB each), or dropping
+  draw.io.
 - **Routing time.** Routing time grows with the square of the number of
   links. Measured on synthetic grid topologies:
 

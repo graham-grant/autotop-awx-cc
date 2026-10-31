@@ -45,8 +45,7 @@ def box(sid, x, y, w, h, text="", **kw):
 
 
 def icon(title):
-    lib = icon_library.load_icon_library(config.DEFAULT_ICON_LIBRARY_PATH)
-    return lib[title].icon()
+    return icon_library.load(config.DEFAULT_ICON_DIR)[title]
 
 
 class Package:

@@ -153,6 +153,31 @@ file too, so arranging the diagram needs no draw.io either.
   read once (the old loader, kept only for this), and `template.vsdx` is
   written at the end of the run.
 
+## Icons as PNG files
+
+Icons came from `docs/Prod_Library.xml`, a draw.io shape library. With the
+draw.io dependency going, Jon chose a folder of PNG files (stencils may
+follow later). The options considered, and what each meant for the two
+writers:
+
+| Source | Visio | draw.io |
+| --- | --- | --- |
+| **PNG files** (chosen) | Picture | Picture |
+| SVG files | Plain box unless the SVG only wraps a PNG: the standard library can't rasterise SVG, and embedding SVG in a `.vsdx` would need checking in Visio | Native |
+| Visio stencils (`.vssx`) | The real stencil masters | Only a picture embedded in a master, otherwise a plain box |
+
+- `icons/` at the project root holds one PNG per icon. A host's inventory
+  `icon` names the file, with or without `.png`, so existing inventories
+  keep working: the files are named after the old library titles.
+- The library's seven pictures were exported into `icons/`. Each was a PNG
+  or an SVG wrapping a PNG, and the exported files are byte-identical to
+  the PNGs both writers already used. The library file was removed.
+- Every icon now has the device name below it. In the library, the three
+  photo entries (4431 Rear, Cisco R42610 Front, ASR1004 Front/Rear) put
+  the name over the picture instead.
+- `python3 scripts/icon_library.py export LIBRARY.xml icons` exports any
+  other draw.io library the same way.
+
 ## Failure handling
 
 If one writer raises, `main.py` deletes any older copy of its file so a
@@ -173,20 +198,12 @@ so the converter was replaced by the model and two writers described above.
 
 ## Open points
 
-- **Icon library format.** `docs/Prod_Library.xml` is a draw.io library
-  file; the code only reads the pictures from it. Other sources, and what
-  each would mean for each writer:
-  - PNG files: both writers draw them as they do now.
-  - SVG files: draw.io draws them natively. The Visio writer only handles
-    an SVG that wraps one PNG; any other SVG is a plain box, since the
-    standard library can't rasterise it. Embedding the SVG itself in the
-    `.vsdx` (newer Visio versions support SVG pictures) would need a check
-    in Visio.
-  - Visio stencils (`.vssx`): the Visio writer would copy each master into
-    the document and place instances of it, so Visio shows the real
-    stencil shape. draw.io has no use for a Visio master, so the draw.io
-    file would show the master's embedded picture if it has one, and a
-    plain box otherwise.
+- **Visio stencils.** Icons are PNGs for now (see above); stencils may
+  follow. The Visio writer would copy each master from the `.vssx` into the
+  document and place instances of it, so Visio shows the real stencil
+  shape. draw.io has no use for a Visio master, so the draw.io file would
+  show the master's embedded picture if it has one, and a plain box
+  otherwise.
 - **Dropping draw.io.** Remove `drawio` from `OUTPUT_FORMATS`, then delete
   `scripts/drawio.py`, `scripts/drawio_position_loader.py` (once every
   template has been upgraded) and their tests.

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import config
 import diagram as dg
+import icon_library
 from config import STATUS_UP_COLOR, STATUS_DOWN_COLOR, INTF_ABBREVIATIONS
 
 PAGE_ID = "topology"
@@ -42,11 +43,12 @@ def _side_fraction(side: str, frac: float) -> tuple:
             "top": (frac, 0.0), "bottom": (frac, 1.0)}[side]
 
 
-def build(nodes: list, specs: list, edges_by_id: dict, icons_by_id=None, icon_library=None,
+def build(nodes: list, specs: list, edges_by_id: dict, icons_by_id=None, icons=None,
           segments=()) -> dg.Diagram:
     """The topology page. edges_by_id maps each LinkSpec's id to this
     project's edge dict; icons_by_id maps node ids to icon library titles
-    (see icon_library.load_icon_library); segments (from
+    and icons maps icon names to
+    diagram.Icon (see icon_library.load); segments (from
     parser.extract_links) get the shared-segment style and their label
     (network, VRF, VLAN) instead of their id."""
     page = dg.Page(PAGE_ID, "Topology")
@@ -60,12 +62,10 @@ def build(nodes: list, specs: list, edges_by_id: dict, icons_by_id=None, icon_li
             shape.style = dict(config.SEGMENT_NODE_STYLE)
             shape.text = seg_labels[n.id]
         title = icons_by_id.get(n.id)
-        if title and icon_library:
-            entry = icon_library.get(title)
-            if entry is None:
-                print(f"render: no icon library entry for '{title}' (node {n.id})")
-            else:
-                shape.icon = entry.icon()
+        if title:
+            shape.icon = icon_library.find(icons or {}, title)
+            if shape.icon is None:
+                print(f"render: no icon '{title}' in the icon folder (node {n.id})")
         page.add(shape)
 
     for s in specs:

@@ -42,17 +42,18 @@ reposition it by hand once.
 
 Usage:
     python3 main.py [facts_dir] [output_dir] [--inventory=PATH] [--template=PATH]
-                    [--icon-library=PATH] [--reparse] [--formats=vsdx,drawio]
+                    [--icons=DIR] [--reparse] [--formats=vsdx,drawio]
 
 Defaults: facts_dir=output/facts, output_dir=output,
 inventory=<project root>/inventory.yml, template=<project root>/template.vsdx,
-icon-library=<project root>/docs/Prod_Library.xml
+icons=<project root>/icons
 
 Each host can get a preferred icon by adding an `icon:` key to its entry
 in inventory.yml (or a `vars: {icon: ...}` block on a group, inherited by
-every host under it) - the value must match an entry's title in the icon
-library exactly, e.g. icon: "C9200-24P Front". A host with no icon set
-falls back to the plain rectangle.
+every host under it) - the value names a PNG in the icons folder, with or
+without .png, e.g. icon: "C9200-24P Front" for icons/C9200-24P Front.png.
+A host with no icon set, or whose icon isn't found, falls back to the
+plain rectangle.
 
 --formats (default config.OUTPUT_FORMATS) picks the files written:
 "vsdx" for topology.vsdx, "drawio" for topology.drawio. An output file of
@@ -177,7 +178,7 @@ def main():
     out_dir = positional[1] if len(positional) > 1 else config.DEFAULT_OUTPUT_DIR
     inventory_path = _parse_path_arg(argv, "--inventory", config.DEFAULT_INVENTORY_PATH)
     template_path = _parse_path_arg(argv, "--template", config.DEFAULT_TEMPLATE_PATH)
-    icon_library_path = _parse_path_arg(argv, "--icon-library", config.DEFAULT_ICON_LIBRARY_PATH)
+    icon_dir = _parse_path_arg(argv, "--icons", config.DEFAULT_ICON_DIR)
 
     nodes = parser.load_nodes(facts_dir, reparse="--reparse" in argv)
     if not nodes:
@@ -215,8 +216,8 @@ def main():
     hanan_nodes, specs = pathfinder.build_link_specs(edges, centers, sizes, preferred_sides)
 
     icons_by_id = parser.load_icons(inventory_path)
-    icon_lib = icon_library.load_icon_library(icon_library_path)
-    diagram = renderer.build(hanan_nodes, specs, edges_by_id, icons_by_id, icon_lib, segments)
+    icons = icon_library.load(icon_dir) if icons_by_id else {}
+    diagram = renderer.build(hanan_nodes, specs, edges_by_id, icons_by_id, icons, segments)
 
     # Protocol features (features/), each on its own layer above the
     # physical diagram. A feature that fails is reported and left out.

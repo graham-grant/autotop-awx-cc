@@ -14,7 +14,8 @@ DEFAULT_OUTPUT_DIR = "output"
 # inventory.yml and template.vsdx live at the project root, one level up
 # from scripts/ - sibling to the playbooks/ directory.
 _PROJECT_ROOT = Path(__file__).parent.parent
-DEFAULT_ICON_LIBRARY_PATH = _PROJECT_ROOT / "docs/Prod_Library.xml"
+# Node icons: one PNG per icon, named as the inventory's `icon` values
+DEFAULT_ICON_DIR = _PROJECT_ROOT / "icons"
 DEFAULT_INVENTORY_PATH = _PROJECT_ROOT / "inventory.yml"
 DEFAULT_TEMPLATE_PATH = _PROJECT_ROOT / "template.vsdx"
 
