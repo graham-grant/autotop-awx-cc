@@ -1,6 +1,6 @@
 # autotop-awx production rebuild, stage 1: read-only data gathering
 
-Instructions for Microsoft Copilot · Written 2026-10-31 · Reference: graham-grant/autotop-awx-cc `main` a3e6da7 · Conformance kit: `conformance/stage1/kit.json`, SHA-256 starting `9d80860f96e9ccca`
+Instructions for Microsoft Copilot · Written 2026-10-31 · Superseded by the [2026-11-02 revision](../2026-11-02/copilot-stage-1-data-gathering.md) · Reference: graham-grant/autotop-awx-cc `main` a3e6da7 · Conformance kit: `conformance/stage1/kit.json`, SHA-256 starting `9d80860f96e9ccca`
 
 Supersedes the 2026-10-25 [Copilot rebuild instructions](../2026-10-25/copilot-rebuild-instructions.docx), which rebuilt the whole project in one pass from an older snapshot (before the read-only safeguards existed). This document rebuilds only the data gathering stage, from the current code, in a form that can be checked exactly. The [roadmap](production-rebuild-roadmap.md) lists the later stages and the [validation method](production-rebuild-validation.md) explains every check used here.
 
