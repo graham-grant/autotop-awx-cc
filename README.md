@@ -1020,7 +1020,9 @@ Since 2026-11-03, production collection is being written by hand with
 Copilot writing single functions, to a simpler design that keeps the
 schema 2 format, the drivers and the command whitelist but not the exact
 behaviour of this code: see the
-[collection rebuild guide](docs/design-archive/2026-11-03/collection-rebuild-guide.md).
+[collection rebuild guide](docs/design-archive/2026-11-03/collection-rebuild-guide.md),
+and the [quickstart](docs/design-archive/2026-11-03/collection-quickstart.md)
+for the first job.
 The kits below belong to the earlier exact-rebuild approach. They still
 check this code and stay in step with it, but production no longer runs
 them.
