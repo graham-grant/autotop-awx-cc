@@ -50,6 +50,7 @@ Contents:
 | --- | --- |
 | `inventory.yml` | The Ansible inventory: devices in `network_devices`, the file server in `artifact_server` |
 | `playbooks/gather_topology.yml` | The whole pipeline: collect, build, publish, audit |
+| `playbooks/preflight.yml` | Checks an execution environment without contacting any device: Python and OpenSSH versions, the test suite, the read-only plan |
 | `playbooks/collect_facts.yml` | Collection only: collect, audit and check the JSON, with no diagram (stage 1 of the [production roadmap](docs/design-archive/2026-11-08/production-roadmap.md)) |
 | `playbooks/group_vars/` | Credential lookups (`all.yml`) and SSH options (`network_devices.yml`) |
 | `icons/` | The device icons, one PNG file per icon |
@@ -970,6 +971,12 @@ overriding `OUTPUT_FORMATS`: `--formats=vsdx` writes only the Visio file
 (and removes an older `topology.drawio` from the output folder).
 
 ## Running it
+
+Before the first job on a new execution environment, and after any change
+to the project, run `playbooks/preflight.yml`. It contacts no device: it
+checks for Python 3.9 or later and the OpenSSH client, runs the test suite
+on that environment's Python, and prints the read-only command plan for
+each platform in the inventory.
 
 To collect and check the JSON only, with no diagram, use
 `playbooks/collect_facts.yml` in place of `gather_topology.yml` below (see

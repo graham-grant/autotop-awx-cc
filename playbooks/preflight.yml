@@ -1,0 +1,63 @@
+---
+# Checks the AWX execution environment can run collection, without
+# contacting any device: the Python and OpenSSH versions, the project's own
+# test suite (which runs the SSH session against a fake device, on this
+# environment's Python), and the read-only command plan for each platform.
+# Run it once on a new execution environment, and after any change to the
+# project, before collect_facts.yml.
+#
+# Usage:
+#   ansible-playbook -i inventory.yml playbooks/preflight.yml
+
+- name: Check the execution environment, contacting no device
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  vars:
+    root: "{{ playbook_dir }}/.."
+  tasks:
+    - name: Check Python is 3.9 or later
+      command: python3 -c "import sys; print(sys.version); sys.exit(sys.version_info < (3, 9))"
+      register: python_version
+      changed_when: false
+
+    - name: Check the OpenSSH client is installed
+      command: ssh -V
+      register: ssh_version
+      changed_when: false
+
+    - name: Show the versions
+      debug:
+        msg:
+          - "python3 {{ python_version.stdout }}"
+          - "{{ ssh_version.stderr | default(ssh_version.stdout) }}"
+
+    - name: Run the project's tests
+      command: python3 -m unittest discover -s tests
+      args:
+        chdir: "{{ root }}"
+      register: tests
+      changed_when: false
+      failed_when: false
+
+    - name: Show the test result
+      debug:
+        msg: "{{ tests.stderr_lines[-3:] }}"
+
+    - name: Fail if a test failed
+      assert:
+        that: tests.rc == 0
+        fail_msg: "{{ tests.stderr_lines | select('match', '^(FAIL|ERROR):') | list }}"
+        quiet: true
+
+    - name: Check the read-only command plan for each platform
+      command: python3 collect.py --plan --platform {{ item }}
+      args:
+        chdir: "{{ root }}/scripts"
+      loop: "{{ groups['network_devices'] | default([]) | map('extract', hostvars, 'ansible_network_os') | unique | list }}"
+      register: command_plan
+      changed_when: false
+
+    - name: Show the read-only command plan
+      debug:
+        msg: "{{ command_plan.results | map(attribute='stdout_lines') | list }}"
