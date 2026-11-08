@@ -50,6 +50,7 @@ Contents:
 | --- | --- |
 | `inventory.yml` | The Ansible inventory: devices in `network_devices`, the file server in `artifact_server` |
 | `playbooks/gather_topology.yml` | The whole pipeline: collect, build, publish, audit |
+| `playbooks/collect_facts.yml` | Collection only: collect, audit and check the JSON, with no diagram (stage 1 of the [production roadmap](docs/design-archive/2026-11-08/production-roadmap.md)) |
 | `playbooks/group_vars/` | Credential lookups (`all.yml`) and SSH options (`network_devices.yml`) |
 | `icons/` | The device icons, one PNG file per icon |
 | `docs/design-archive/` | Design documents, one dated folder per revision |
@@ -60,10 +61,11 @@ Contents:
 | `scripts/commands.py` | Works out which show commands to run on a device |
 | `scripts/readonly.py` | The read-only command policy every command must pass before it is sent |
 | `scripts/audit.py` | Re-checks the commands recorded for every device after collection |
+| `scripts/check_facts.py` | Checks each facts file's JSON: keys, types, allowed values and formats, and that what was sent and kept matches the plan |
 | `scripts/drivers/` | Platform drivers: turn each platform's output into the common device record (schema 2), one module per platform (`ios.py`, `panos.py`, `windows.py`), plus shared MAC and interface-name helpers (`common.py`) |
 | `scripts/drivers/powershell/` | The fixed PowerShell scripts run on Windows servers, each checked by the read-only policy before it is sent |
 | `scripts/main.py` | Entry point for building the diagram |
-| `scripts/parser.py` | Loads the JSON files as schema 2 records |
+| `scripts/facts.py` | Loads the JSON files as schema 2 records |
 | `scripts/links.py` | Works out the links from LLDP/CDP, MAC tables and shared subnets |
 | `scripts/positions.py` | Reads and writes node positions in the position template, `template.vsdx` |
 | `scripts/drawio_position_loader.py` | Reads an older `template.drawio` once, to carry its positions over to `template.vsdx` |
@@ -312,6 +314,57 @@ shell on the server:
 Collection is the only step that talks to the devices. Everything after it,
 features included, works from these JSON files.
 
+### Collection only: `collect_facts.yml`
+
+`playbooks/collect_facts.yml` runs the same collection with the same
+safeguards, and stops there: it builds no diagram and, unless
+`artifact_facts_dir` is set, copies nothing. It is stage 1 of the
+[production roadmap](docs/design-archive/2026-11-08/production-roadmap.md),
+for confirming that SSH works and that the JSON is right before anything
+else runs. It has four plays:
+
+1. **Plan (localhost).** It creates `output/facts/`, removes facts files
+   left from an earlier run (so only this run's files are checked), and
+   prints the read-only command plan for each platform in the inventory.
+   A command the policy would refuse stops the job here.
+2. **Collect (every host in `network_devices`).** Each host's platform must
+   be in `collect_platforms` (default `[ios]`); any other host fails without
+   being contacted, so firewalls and servers are left alone until their
+   stage. Then the credential check and `collect.py`, as in play 2 above.
+   The lines sent are printed whether collection worked or not, and a host
+   whose `collect.py` exited non-zero fails (exit 3: a read-only safeguard
+   stopped it or the configuration changed).
+3. **Copy (optional, `artifact_server`).** Copies `output/facts/` to
+   `artifact_facts_dir` on the artifact server, only if that variable is
+   set.
+4. **Check (localhost).** Runs `audit.py` and then `check_facts.py` on
+   `output/facts/`, prints both, and fails the job if either found a
+   problem. With `show_facts=true` it also prints each facts file, without
+   its raw output and audit, in the job log.
+
+`scripts/check_facts.py` reads files only. For each file it checks every
+key, type and allowed value of the format below (MAC addresses written
+`aa:bb:cc:dd:ee:ff`, addresses and prefixes that parse, timestamps with a
+time zone), that the device name is the file name, that raw output is kept
+only for planned commands, that nothing was refused or cancelled, that the
+configuration didn't change and, for SSH hosts, that the lines sent were
+exactly the plan in order. It warns, without failing, about a planned
+command with no output (the device doesn't support it), empty output, an
+unreadable config-change marker, a `parse_error`, a device with no
+interfaces, and neighbor, ARP or MAC table entries on interface names the
+device doesn't have. It prints one line per device, such as
+
+```text
+ok    9200-1: C9200-24P 17.09.04a, 30 interfaces (12 up, 1 with IPv4), 3 neighbors, 14 ARP, 41 MAC, 10/10 commands kept, facets ['ipsec', 'vlans']
+CHECK PASS 2 file(s), 0 with problems, 0 with warnings only
+```
+
+and exits 1 if any file has a problem. Run it by hand with
+`python3 scripts/check_facts.py output/facts`.
+
+If every host fails in play 2, Ansible stops there, so the audit and check
+don't run; the job log already shows why each host failed.
+
 ### Device facts format
 
 Every device, whatever its vendor, gets one file with the same shape
@@ -450,7 +503,7 @@ audit.
 
 `scripts/main.py` turns the JSON files into `topology.vsdx` and `topology.drawio`:
 
-1. **Load.** `parser.py` reads every JSON file as a schema 2 record,
+1. **Load.** `facts.py` reads every JSON file as a schema 2 record,
    upgrading older files (see [Device facts format](#device-facts-format)).
    With `--reparse`, each file is re-parsed from its raw output first.
 2. **Derive links** (`links.py`). Links come from three kinds of evidence,
@@ -918,6 +971,10 @@ overriding `OUTPUT_FORMATS`: `--formats=vsdx` writes only the Visio file
 
 ## Running it
 
+To collect and check the JSON only, with no diagram, use
+`playbooks/collect_facts.yml` in place of `gather_topology.yml` below (see
+[Collection only](#collection-only-collect_factsyml)).
+
 **In AWX:** create a job template for `playbooks/gather_topology.yml` with
 the project's `inventory.yml` as its inventory, and attach a Network
 credential (plus the Palo Alto and Windows credentials, if those use their
@@ -999,7 +1056,10 @@ template (exact round trip, moves and Side set as in Visio, grouped and
 off-centre shapes, upgrading from `template.drawio`, and keeping the old
 template if writing fails), the icon folder (and exporting a draw.io
 library into it), and
-the read-only safeguards, for the SSH, API and PowerShell policies. `tests/fixtures/windows/` holds a Windows server's script output,
+the read-only safeguards, for the SSH, API and PowerShell policies, and
+the facts checker (every driver's record passes, a whole IOS collection
+through the real SSH session against the fake `ssh` replaying fixture
+output passes and matches the driver, and one broken record per rule). `tests/fixtures/windows/` holds a Windows server's script output,
 which `tests/fake_winssh.py` serves as a fake OpenSSH server: it decodes
 the script it is sent and logs it, so the tests check that the server
 received exactly the script the policy checked. The fake `ssh` logs every line it
