@@ -3,7 +3,7 @@
 Build the topology diagram, as a Microsoft Visio file and a draw.io file,
 from the per-host JSON files written by playbooks/gather_topology.yml.
 
-This is the coordinator: load data (parser.py), decide node positions and
+This is the coordinator: load data (facts.py), decide node positions and
 route every link through the Hanan-grid A* engine (pathfinder.py), draw
 the nodes, links and interface labels into a format-independent diagram
 (renderer.py, diagram.py), let each enabled protocol feature (features/ -
@@ -68,7 +68,7 @@ from pathlib import Path
 import config
 import features
 from features.context import Topology
-import parser
+import facts
 import pathfinder
 import renderer
 import icon_library
@@ -180,18 +180,18 @@ def main():
     template_path = _parse_path_arg(argv, "--template", config.DEFAULT_TEMPLATE_PATH)
     icon_dir = _parse_path_arg(argv, "--icons", config.DEFAULT_ICON_DIR)
 
-    nodes = parser.load_nodes(facts_dir, reparse="--reparse" in argv)
+    nodes = facts.load_nodes(facts_dir, reparse="--reparse" in argv)
     if not nodes:
         sys.exit(f"No fact files found in {facts_dir} - run the playbook first.")
 
-    edges, segments = parser.extract_links(nodes)
+    edges, segments = facts.extract_links(nodes)
     edges_by_id = {e["id"]: e for e in edges}
     node_names = [n["device"]["name"] for n in nodes]
     segment_ids = [s["id"] for s in segments]
 
     pinned = positions.load(template_path, inventory_path)
     pinned = {k: v for k, v in pinned.items()  # drop segments that no longer exist
-              if not k.startswith(parser.SEGMENT_PREFIX) or k in segment_ids}
+              if not k.startswith(facts.SEGMENT_PREFIX) or k in segment_ids}
 
     # Dynamically evaluate sizes from inventory.yml before falling back to defaults
     sizes = _load_node_sizes(inventory_path, node_names)
@@ -215,7 +215,7 @@ def main():
 
     hanan_nodes, specs = pathfinder.build_link_specs(edges, centers, sizes, preferred_sides)
 
-    icons_by_id = parser.load_icons(inventory_path)
+    icons_by_id = facts.load_icons(inventory_path)
     icons = icon_library.load(icon_dir) if icons_by_id else {}
     diagram = renderer.build(hanan_nodes, specs, edges_by_id, icons_by_id, icons, segments)
 

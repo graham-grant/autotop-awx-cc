@@ -11,7 +11,7 @@ from pathlib import Path
 
 import support
 import drivers
-import parser as facts_parser
+import facts as facts_parser
 
 
 def host(name, *intfs):

@@ -49,7 +49,7 @@ def build(nodes: list, specs: list, edges_by_id: dict, icons_by_id=None, icons=N
     project's edge dict; icons_by_id maps node ids to icon library titles
     and icons maps icon names to
     diagram.Icon (see icon_library.load); segments (from
-    parser.extract_links) get the shared-segment style and their label
+    facts.extract_links) get the shared-segment style and their label
     (network, VRF, VLAN) instead of their id."""
     page = dg.Page(PAGE_ID, "Topology")
     seg_labels = {s["id"]: s["label"] for s in segments}
