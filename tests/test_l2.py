@@ -16,7 +16,7 @@ from pathlib import Path
 import support
 import config
 import drivers
-import parser as facts_parser
+import facts as facts_parser
 from drivers import ios
 from drivers.common import canonical_intf, norm_mac
 from features.vlans import FEATURE as VLANS

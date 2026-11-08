@@ -19,7 +19,7 @@ import support
 import audit
 import collect
 import drivers
-import parser as facts_parser
+import facts as facts_parser
 import readonly
 import xmlapi
 from drivers import panos

@@ -8,7 +8,9 @@ FAKE_SSH_MODE=configchange makes the config-change marker move between
 reads. Every line received after login is appended to $FAKE_SSH_LOG (if
 set), so tests can compare what the device got with collect's audit.
 "show confirm-test" asks for "[confirm]"; "show hang" never finishes until
-Ctrl-C."""
+Ctrl-C. FAKE_SSH_RAW names a facts fixture whose "cli" output is
+replayed for its commands, so a whole IOS collection can be run."""
+import json
 import os
 import sys
 import termios
@@ -18,6 +20,10 @@ import tty
 MODE = os.environ.get("FAKE_SSH_MODE", "inband")
 PAGER = "More: <space>,  Quit: q or CTRL+Z, One line: <return> "
 LOG = os.environ.get("FAKE_SSH_LOG")
+RAW = {}
+if os.environ.get("FAKE_SSH_RAW"):
+    with open(os.environ["FAKE_SSH_RAW"]) as f:
+        RAW = json.load(f)["cli"]
 
 
 def log(entry):
@@ -92,6 +98,8 @@ while True:
             pass
         log("ctrl-c")
         out("^C\r\n")
+    elif cmd in RAW:
+        out(RAW[cmd].replace("\r\n", "\n").replace("\n", "\r\n").rstrip() + "\r\n")
     elif cmd == "show version":
         out("SW version    3.0.0.44\r\n")
     elif cmd in ("exit", "logout"):

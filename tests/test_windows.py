@@ -20,7 +20,7 @@ import support
 import audit
 import collect
 import drivers
-import parser as facts_parser
+import facts as facts_parser
 import readonly
 from drivers import windows
 from features.roles import FEATURE as ROLES

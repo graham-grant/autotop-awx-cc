@@ -1,5 +1,5 @@
 """
-Reads inventory.yml once, in one place. parser.py, main.py and
+Reads inventory.yml once, in one place. facts.py, main.py and
 drawio_position_loader.py each used to walk the YAML tree themselves; they
 now share host_vars() below, which applies Ansible's group-var inheritance
 (a `vars:` block on a group is inherited by every host under it, with a

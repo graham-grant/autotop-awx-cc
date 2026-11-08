@@ -3,7 +3,7 @@ import math
 import unittest
 
 import support
-import parser as facts_parser
+import facts as facts_parser
 from pathfinder import Node
 from features.context import Topology
 from features.ipsec import FEATURE as IPSEC
