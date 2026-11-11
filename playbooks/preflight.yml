@@ -16,8 +16,8 @@
   vars:
     root: "{{ playbook_dir }}/.."
   tasks:
-    - name: Check Python is 3.9 or later
-      command: python3 -c "import sys; print(sys.version); sys.exit(sys.version_info < (3, 9))"
+    - name: Check Python is 3.8 or later
+      command: python3 -c "import sys; print(sys.version); sys.exit(sys.version_info < (3, 8))"
       register: python_version
       changed_when: false
 

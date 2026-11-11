@@ -8,7 +8,7 @@ diagram of how they connect. The diagram is written as a Microsoft Visio
 file and as a draw.io file, each directly by its own writer, so neither
 format depends on the other (see [Output formats](#output-formats)).
 It runs as a single AWX job (or `ansible-playbook` by hand) and needs nothing
-beyond Ansible and a base Python 3.9+ install: no NAPALM, no Ansible
+beyond Ansible and a base Python 3.8+ install: no NAPALM, no Ansible
 collections, no PyYAML, nothing to `pip install`, and no compiler.
 
 Collection is strictly read-only. Every command sent to a device is checked
@@ -51,7 +51,8 @@ Contents:
 | `inventory.yml` | The Ansible inventory: devices in `network_devices`, the file server in `artifact_server` |
 | `playbooks/gather_topology.yml` | The whole pipeline: collect, build, publish, audit |
 | `playbooks/preflight.yml` | Checks an execution environment without contacting any device: Python and OpenSSH versions, the test suite, the read-only plan |
-| `playbooks/collect_facts.yml` | Collection only: collect, audit and check the JSON, with no diagram (stage 1 of the [production roadmap](docs/design-archive/2026-11-08/production-roadmap.md)) |
+| `playbooks/collect_facts.yml` | Collection only: collect, audit and check the JSON, with no diagram (stage 1 of the [production roadmap](docs/design-archive/2026-11-11/production-roadmap.md)) |
+| `dummy/` | Simulated Cisco IOS devices for a test run that contacts no real device: `dummy/bin/ssh` stands in for the ssh client, and `dummy/inventory.yml` lists the dummy hosts |
 | `playbooks/group_vars/` | Credential lookups (`all.yml`) and SSH options (`network_devices.yml`) |
 | `icons/` | The device icons, one PNG file per icon |
 | `docs/design-archive/` | Design documents, one dated folder per revision |
@@ -320,11 +321,11 @@ features included, works from these JSON files.
 `playbooks/collect_facts.yml` runs the same collection with the same
 safeguards, and stops there: it builds no diagram and, unless
 `artifact_facts_dir` is set, copies nothing. It is stage 1 of the
-[production roadmap](docs/design-archive/2026-11-08/production-roadmap.md),
+[production roadmap](docs/design-archive/2026-11-11/production-roadmap.md),
 for confirming that SSH works and that the JSON is right before anything
 else runs. It has four plays:
 
-1. **Plan (localhost).** It creates `output/facts/`, removes facts files
+1. **Plan (localhost).** It creates `output/facts/` and `output/dummy/`, removes facts files
    left from an earlier run (so only this run's files are checked), and
    prints the read-only command plan for each platform in the inventory.
    A command the policy would refuse stops the job here.
@@ -365,6 +366,41 @@ and exits 1 if any file has a problem. Run it by hand with
 
 If every host fails in play 2, Ansible stops there, so the audit and check
 don't run; the job log already shows why each host failed.
+
+### Dummy run: simulated devices
+
+To test the whole job, in AWX or by hand, before any real device is
+contacted, run `collect_facts.yml` with `dummy/inventory.yml` as the
+inventory and any Network credential (a dummy device accepts any non-empty
+password):
+
+```bash
+NET_USERNAME=dummy NET_PASSWORD=dummy \
+  ansible-playbook -i dummy/inventory.yml playbooks/collect_facts.yml
+```
+
+A host with `dummy_device` set is collected with `dummy/bin/ssh` first on
+`PATH`, so `ssh` is a small script that plays a Cisco IOS device in the
+pseudo-terminal instead of the OpenSSH client. It makes no network
+connection. Everything else is the production code, unchanged:
+`collect.py`, `CliSession`, the read-only policy, the audit and the JSON
+check. The dummy device:
+
+- asks for the password and accepts any non-empty one, never logging it;
+- shows a `<host>#` prompt and pages output with ` --More-- ` until
+  `terminal length 0`;
+- answers each command from the saved output in its `dummy_device` file
+  (the test fixtures: two Catalyst 9300 switches, a router and an IOS-XE
+  router with IPsec tunnels), and rejects anything else with
+  `% Invalid input detected`, as IOS does;
+- writes every line it receives to `output/dummy/<host>.log`, which the job
+  prints: the device's own record, to compare with the job's `sent` lines.
+
+With `dummy_mode: configchange` on a host, the configuration-change marker
+moves during collection; with `dummy_mode: confirm`, the first `show`
+command asks `[confirm]`. Both hosts must fail (exit 3), and the confirm
+one's log must show `ctrl-c`, never an answer. `dummy/inventory.yml` has
+both, commented out. Only IOS hosts can be dummies.
 
 ### Device facts format
 
@@ -974,7 +1010,7 @@ overriding `OUTPUT_FORMATS`: `--formats=vsdx` writes only the Visio file
 
 Before the first job on a new execution environment, and after any change
 to the project, run `playbooks/preflight.yml`. It contacts no device: it
-checks for Python 3.9 or later and the OpenSSH client, runs the test suite
+checks for Python 3.8 or later and the OpenSSH client, runs the test suite
 on that environment's Python, and prints the read-only command plan for
 each platform in the inventory.
 
@@ -1014,7 +1050,7 @@ draw.io (desktop, web, or the VS Code extension).
 The A* search in `pathfinder.py` runs in a CPython C extension,
 `scripts/csrc/_hanan.c`, about 80 times faster than the same code in Python.
 It's built against CPython's stable ABI, so one compiled file,
-`scripts/_hanan.abi3.so`, loads on every CPython 3.9 or later on Linux
+`scripts/_hanan.abi3.so`, loads on every CPython 3.8 or later on Linux
 x86_64, and needs nothing newer than glibc 2.4. That file is prebuilt and
 committed, so AWX needs no compiler or Python headers.
 
@@ -1066,7 +1102,10 @@ library into it), and
 the read-only safeguards, for the SSH, API and PowerShell policies, and
 the facts checker (every driver's record passes, a whole IOS collection
 through the real SSH session against the fake `ssh` replaying fixture
-output passes and matches the driver, and one broken record per rule). `tests/fixtures/windows/` holds a Windows server's script output,
+output passes and matches the driver, and one broken record per rule), and
+the dummy devices (every dummy host collects and passes the check, the
+device's own log equals the audit and the plan, the pager, and the
+configuration-change and confirmation safeguards). `tests/fixtures/windows/` holds a Windows server's script output,
 which `tests/fake_winssh.py` serves as a fake OpenSSH server: it decodes
 the script it is sent and logs it, so the tests check that the server
 received exactly the script the policy checked. The fake `ssh` logs every line it

@@ -1,6 +1,6 @@
 # Production roadmap
 
-Created 2026-11-08 · Status: proposed; stage 1 ready to run · Code: this repository, branch `main` once this change is merged
+Created 2026-11-08 · Status: proposed. Superseded by the [2026-11-11 revision](../2026-11-11/production-roadmap.md) · Code: this repository, branch `main` once this change is merged
 
 ## What changed
 

@@ -1,6 +1,6 @@
 # Stage 1 checklist: read-only data gathering in AWX
 
-Created 2026-11-08 · Status: ready to run · Part of the [production roadmap](production-roadmap.md)
+Created 2026-11-08 · Status: superseded by the [2026-11-11 revision](../2026-11-11/stage-1-awx-checklist.md) · Part of the [production roadmap](production-roadmap.md)
 
 This proves two things on real devices: that AWX can log in to them over SSH, and that the JSON collection writes is correct. It uses `playbooks/preflight.yml` and `playbooks/collect_facts.yml` from this repository, unchanged. Only Cisco IOS / IOS-XE hosts are contacted.
 

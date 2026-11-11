@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+"""
+A dummy Cisco IOS switch that stands in for the `ssh` client, for a test
+run of collection that contacts no real device and uses no network.
+
+playbooks/collect_facts.yml puts dummy/bin first on PATH for a host that
+has `dummy_device` set (see dummy/inventory.yml), so scripts/collect.py and
+sshcli.CliSession run exactly as they would against a real switch. The
+only difference is that `ssh` is this script, which plays the device in
+the pseudo-terminal. It never opens a network connection.
+
+It behaves like IOS:
+  - asks "<user>@<host>'s password:" and accepts any non-empty password
+    (the password is never logged, stored or echoed);
+  - shows a "<hostname>#" prompt, pages output with " --More-- " until
+    "terminal length 0" is received;
+  - answers each command from the device file named by DUMMY_DEVICE (a
+    JSON file with {"cli": {command: output}}), and rejects anything else
+    with "% Invalid input detected at '^' marker.";
+  - answers "show running-config | include configuration change" with a
+    fixed "Last configuration change" line.
+
+Every line it receives after login is appended to DUMMY_LOG, if set: the
+device's own record of what it was sent, to compare with the job's audit.
+
+DUMMY_MODE changes its behaviour, to show the safeguards working:
+  configchange  the configuration-change marker moves between the two
+                reads, so collection must fail the host (exit 3)
+  confirm       the first "show" command asks "[confirm]", which
+                collection must cancel with Ctrl-C, never answer
+"""
+import json
+import os
+import sys
+import termios  # noqa: F401  (fails clearly where there is no pty support)
+import tty
+
+MODE = os.environ.get("DUMMY_MODE", "")
+LOG = os.environ.get("DUMMY_LOG")
+PAGE_LINES = 24
+MORE = " --More-- "
+
+
+def log(entry):
+    if LOG:
+        with open(LOG, "a", encoding="utf-8") as f:
+            f.write(entry + "\n")
+
+
+def out(text):
+    sys.stdout.write(text)
+    sys.stdout.flush()
+
+
+def read_line(echo=True):
+    buf = ""
+    while True:
+        c = sys.stdin.read(1)
+        if c in ("\r", "\n", ""):
+            out("\r\n")
+            return buf if c else None
+        if c == "\x03":
+            out("^C\r\n")
+            return c
+        if echo:
+            out(c)
+        buf += c
+
+
+def main(argv):
+    target = next((a for a in reversed(argv) if "@" in a), "dummy@dummy")
+    user, _, host = target.partition("@")
+    device_file = os.environ.get("DUMMY_DEVICE")
+    if not device_file:
+        sys.stderr.write("dummy ssh: DUMMY_DEVICE is not set\n")
+        return 255
+    with open(device_file, encoding="utf-8") as f:
+        cli = json.load(f)["cli"]
+    hostname = os.environ.get("DUMMY_HOSTNAME") or host
+
+    tty.setraw(sys.stdin.fileno())
+    out(f"{user}@{host}'s password: ")
+    if not read_line(echo=False):
+        out("Permission denied, please try again.\r\n")
+        return 255
+    out("\r\n")
+    paging = True
+    marker_reads = 0
+    confirm_pending = MODE == "confirm"
+    while True:
+        out(f"{hostname}#")
+        cmd = read_line()
+        if cmd is None:
+            return 0
+        log("ctrl-c" if cmd == "\x03" else cmd)
+        if cmd in ("\x03", ""):
+            continue
+        if cmd == "terminal length 0":
+            paging = False
+        elif cmd == "show running-config | include configuration change":
+            marker_reads += 1
+            minute = 10 + (marker_reads if MODE == "configchange" else 0)
+            out(f"! Last configuration change at 09:{minute}:00 UTC Mon Nov 9 2026 by admin\r\n")
+        elif confirm_pending and cmd.startswith("show "):
+            confirm_pending = False
+            out("Proceed? [confirm]")
+            answer = sys.stdin.read(1)
+            log("ctrl-c" if answer == "\x03" else "CONFIRMED")
+            out("^C\r\n" if answer == "\x03" else "\r\n")
+        elif cmd in cli:
+            lines = cli[cmd].replace("\r\n", "\n").rstrip("\n").split("\n")
+            for n, line in enumerate(lines, 1):
+                out(line + "\r\n")
+                if paging and n % PAGE_LINES == 0 and n < len(lines):
+                    out(MORE)
+                    sys.stdin.read(1)
+                    out("\r" + " " * len(MORE) + "\r")
+        elif cmd in ("exit", "logout"):
+            return 0
+        else:
+            out(" " * len(hostname) + "^\r\n% Invalid input detected at '^' marker.\r\n\r\n")
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

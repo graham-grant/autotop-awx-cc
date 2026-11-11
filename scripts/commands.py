@@ -8,6 +8,8 @@ automatically.
 
 Usage: python3 commands.py <ansible_network_os>
 """
+from __future__ import annotations
+
 import json
 import sys
 

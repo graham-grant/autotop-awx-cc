@@ -6,8 +6,8 @@
  * and floating-point operation order - so both produce identical paths.
  * tests/test_hanan_c.py checks that.
  *
- * Written against CPython's stable ABI (Py_LIMITED_API, Python 3.9+), so
- * one compiled file - _hanan.abi3.so - loads on every CPython from 3.9 up
+ * Written against CPython's stable ABI (Py_LIMITED_API, Python 3.8+), so
+ * one compiled file - _hanan.abi3.so - loads on every CPython from 3.8 up
  * on the same OS/architecture. That's what lets a prebuilt copy be
  * committed and used on AWX execution environments that have no compiler
  * or Python headers. scripts/build_ext.py (standard library only) builds
@@ -28,7 +28,7 @@
  * Returns a list of (i, j) from a start to a goal, or None.
  */
 #define PY_SSIZE_T_CLEAN
-#define Py_LIMITED_API 0x03090000
+#define Py_LIMITED_API 0x03080000
 #include <Python.h>
 #include <math.h>
 #include <stdlib.h>
