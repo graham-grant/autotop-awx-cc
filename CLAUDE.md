@@ -31,7 +31,7 @@ older files.
 ## Standard library only
 
 Python code imports only the standard library and this project's modules.
-No pip packages and no Ansible collections. It must run on Python 3.9 with
+No pip packages and no Ansible collections. It must run on Python 3.8 with
 no compiler. `scripts/_hanan.abi3.so` is prebuilt and committed. Rebuild it
 with `python3 scripts/build_ext.py` whenever `scripts/csrc/_hanan.c` changes.
 
@@ -53,4 +53,4 @@ commit one. Mask passwords as `****` in any transcript that is shown.
 ## Tests
 
 Run `python3 -m unittest discover -s tests` before every commit. All tests
-must pass, on Python 3.9 as well as newer versions.
+must pass, on Python 3.8 as well as newer versions.

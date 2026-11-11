@@ -5,7 +5,7 @@ library: no setuptools, no pip. It asks sysconfig for the compiler and
 include path of the running interpreter.
 
 The extension uses CPython's stable ABI, so the result -
-scripts/_hanan.abi3.so - loads on every CPython 3.9+ for the same OS and
+scripts/_hanan.abi3.so - loads on every CPython 3.8+ for the same OS and
 CPU architecture. A prebuilt Linux x86_64 copy is committed to the repo,
 so AWX execution environments need neither a compiler nor Python headers.
 Rebuild and commit it whenever csrc/_hanan.c changes (the test suite

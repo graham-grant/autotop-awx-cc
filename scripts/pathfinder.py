@@ -59,7 +59,7 @@ def _load_c_extension():
         raise RuntimeError(
             f"The required C extension couldn't be loaded: {e}\n"
             f"The committed {build_ext.TARGET.name} is built for Linux x86_64 and "
-            f"CPython 3.9+; on another platform run `python3 scripts/build_ext.py`."
+            f"CPython 3.8+; on another platform run `python3 scripts/build_ext.py`."
         ) from e
     return _hanan
 

@@ -16,7 +16,7 @@ Runs on a base Python 3 install: no third-party packages. Host JSON is a
 schema 2 record per device (drivers/; older files are upgraded on load,
 and --reparse re-parses each file's raw output), inventory.yml is read by
 miniyaml.py, and the A* router's search runs in a C extension that ships
-prebuilt (_hanan.abi3.so, CPython 3.9+ stable ABI) - no compiler needed.
+prebuilt (_hanan.abi3.so, CPython 3.8+ stable ABI) - no compiler needed.
 
 Links are derived from directly-connected subnets: every interface IP
 the device reports is grouped by network, and any subnet shared by exactly two
