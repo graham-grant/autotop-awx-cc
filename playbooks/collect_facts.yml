@@ -25,6 +25,10 @@
 #   artifact_facts_dir  copy output/facts/ here on the artifact server
 #                       (default: unset, nothing is copied)
 #
+# Dummy run: with dummy/inventory.yml, every host is a simulated Cisco IOS
+# device (dummy/bin/ssh stands in for the ssh client and replays saved
+# output). The production code runs unchanged and no network is used.
+#
 # Usage:
 #   export NET_USERNAME=admin
 #   export NET_PASSWORD=secret
@@ -44,11 +48,14 @@
         fail_msg: "No hosts in the network_devices group. Check the inventory."
         quiet: true
 
-    - name: Ensure output/facts directory exists
+    - name: Ensure the output directories exist
       file:
-        path: "{{ facts_dir }}"
+        path: "{{ item }}"
         state: directory
         mode: "0755"
+      loop:
+        - "{{ facts_dir }}"
+        - "{{ playbook_dir }}/../output/dummy"
 
     # This job checks the files it writes, so files from an earlier run on
     # the same controller are removed first.
@@ -99,6 +106,11 @@
       paloaltonetworks.panos: panos
       win: windows
     platform: "{{ platform_aliases[ansible_network_os | lower] | default(ansible_network_os | lower) }}"
+    # A host with dummy_device set is a simulated IOS device (see
+    # dummy/inventory.yml): `ssh` is dummy/bin/ssh, and no network is used.
+    root: "{{ playbook_dir }}/.."
+    dummy: "{{ dummy_device is defined }}"
+    dummy_log: "{{ root }}/output/dummy/{{ inventory_hostname }}.log"
   tasks:
     # A platform not yet enabled for this stage is never contacted, even
     # though the code supports it.
@@ -110,6 +122,20 @@
           for this stage (collect_platforms: {{ collect_platforms | default(['ios']) }}).
           It was not contacted.
         quiet: true
+
+    - name: Check a dummy device is an IOS one
+      assert:
+        that: platform == 'ios'
+        fail_msg: "{{ inventory_hostname }}: dummy devices can only be Cisco IOS."
+        quiet: true
+      when: dummy | bool
+
+    - name: Start a fresh log of what the dummy device receives
+      copy:
+        content: ""
+        dest: "{{ dummy_log }}"
+        mode: "0644"
+      when: dummy | bool
 
     - name: Check device credentials were provided
       assert:
@@ -148,6 +174,10 @@
         PANOS_PASSWORD: "{{ panos_password }}"
         WINDOWS_USERNAME: "{{ windows_username }}"
         WINDOWS_PASSWORD: "{{ windows_password }}"
+        PATH: "{{ (root ~ '/dummy/bin:') if dummy | bool else '' }}{{ lookup('env', 'PATH') }}"
+        DUMMY_DEVICE: "{{ (root ~ '/' ~ dummy_device) if dummy | bool else '' }}"
+        DUMMY_LOG: "{{ dummy_log if dummy | bool else '' }}"
+        DUMMY_MODE: "{{ dummy_mode | default('') }}"
       register: collect_result
       changed_when: false
       # Shown below whether it worked or not, then the host fails if it didn't
@@ -156,6 +186,11 @@
     - name: Show the commands sent to the device
       debug:
         msg: "{{ collect_result.stdout_lines + collect_result.stderr_lines }}"
+
+    - name: Show what the dummy device received (its own record)
+      debug:
+        msg: "{{ ['DUMMY DEVICE ' ~ inventory_hostname ~ ' (simulated, no real device contacted) received:'] + lookup('file', dummy_log).splitlines() }}"
+      when: dummy | bool
 
     - name: Fail this host if collection failed
       assert:
