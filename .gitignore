@@ -8,3 +8,5 @@ __pycache__/
 scripts/_hanan.cpython-*.so
 scripts/_hanan*.tmp
 output/dummy/
+output/publish/
+output/diagram-inventory.yml

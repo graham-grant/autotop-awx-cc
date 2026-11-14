@@ -1,214 +1,340 @@
 ---
-# Gathers show-command output from every host in the `network_devices`
-# group (scripts/collect.py - stdlib Python only; no NAPALM, no network
-# collections, nothing to pip install): over SSH with the system ssh client
-# for Cisco, over the PAN-OS XML API (HTTPS) for Palo Alto firewalls,
-# directly or through Panorama, and as fixed, hash-checked PowerShell
-# scripts over OpenSSH for Windows servers. It writes one JSON file per host to
-# output/facts/: the common device format (schema 2), parsed by the
-# platform's driver (scripts/drivers/), with the raw output kept.
-# scripts/main.py reads those files and draws the diagram, with links
-# found from LLDP/CDP, MAC tables and shared subnets (see scripts/links.py),
-# and writes it as a Microsoft Visio file (topology.vsdx) and a draw.io file
-# (topology.drawio), each by its own writer. Both are copied to the
-# artifact server.
+# Collects every device read-only, builds the topology diagram, and
+# publishes it to a git repository (written for an internal Bitbucket).
 #
-# Which commands get run is decided by scripts/commands.py: the core
-# commands the platform's driver needs, plus the commands behind each facet
-# an enabled feature plugin (scripts/features/) draws. Adding a feature
-# never needs an edit here.
+#   Play 1     clone the publish repository (if `bitbucket_repo_url` is set).
+#              A wrong URL, branch or credential stops the job here, before
+#              any device is contacted.
+#   Plays 2-4  playbooks/collect_facts.yml, unchanged: the read-only plan,
+#              collection (only platforms in `collect_platforms`; dummy
+#              devices work too), the audit and the JSON check. If the audit
+#              or the check fails, the job stops there: nothing is built or
+#              published from a run with a read-only problem.
+#   Play 5     build topology.vsdx and topology.drawio with scripts/main.py,
+#              using the node positions in the repository's template.vsdx,
+#              and rewrite template.vsdx
+#   Play 6     commit the diagram and template.vsdx to the publish
+#              repository and push, if anything changed
 #
-# Read-only: collection never changes a device. Play 1 prints the exact
-# commands that will be sent per platform, checked against the read-only
-# policy (scripts/readonly.py), and stops the job before any device is
-# contacted if one would be refused. collect.py checks every command again
-# as it is sent, logs each one, and compares the device's config-change
-# marker before and after. The last play (scripts/audit.py) re-verifies
-# every recorded command from the facts files and fails the job if anything
-# was out of policy or a configuration changed.
+# Variables (extra vars in AWX, or -e by hand):
+#   bitbucket_repo_url      https URL of the repository to publish to, e.g.
+#                           https://bitbucket.example.com/scm/net/topology.git
+#                           with no user name or password in it.
+#                           Unset: the diagram is built but not published.
+#   bitbucket_branch        branch to commit to (default: main). It must
+#                           already exist, with at least one commit.
+#   bitbucket_path          folder in that repository for the files
+#                           (default: topology; "." is the repository root).
+#                           Use a different folder (or branch) for each
+#                           inventory, e.g. topology-dummy and topology-dev.
+#   bitbucket_ca_file       CA bundle for the server's certificate, if it is
+#                           signed by an internal CA the execution
+#                           environment doesn't trust
+#   bitbucket_publish_facts true: also commit the facts JSON files, under
+#                           <bitbucket_path>/facts/ (default: false)
+#   bitbucket_publish_partial
+#                           true: publish even though some inventory devices
+#                           have no facts file from this run (a failed host,
+#                           a platform not in collect_platforms, or --limit).
+#                           Default false: such a run builds the diagram but
+#                           doesn't publish it, and the job fails.
+#   bitbucket_author_name / bitbucket_author_email
+#                           the commit author (default: autotop AWX /
+#                           autotop@localhost)
+#   ...and the variables of collect_facts.yml (collect_platforms, show_facts).
+#
+# The repository credential comes from the job's environment, never a file,
+# a URL or a command line: BITBUCKET_USERNAME and BITBUCKET_TOKEN (in AWX, a
+# custom credential type: see the README). scripts/git_askpass.sh answers
+# git's prompts with them.
+#
+# Node positions: template.vsdx in <bitbucket_path> is the position
+# template. Open it in Visio, move nodes, save, and commit it back to the
+# repository; the next run uses it. If the repository has none yet, the
+# project's own template.vsdx is the starting point, if there is one.
 #
 # Usage:
-#   export NET_USERNAME=admin
-#   export NET_PASSWORD=secret
-#   ansible-playbook -i inventory.yml playbooks/gather_topology.yml
+#   export NET_USERNAME=admin NET_PASSWORD=secret
+#   export BITBUCKET_USERNAME=svc-autotop BITBUCKET_TOKEN=...
+#   ansible-playbook -i inventory.yml playbooks/gather_topology.yml \
+#     -e bitbucket_repo_url=https://bitbucket.example.com/scm/net/topology.git
 
-- name: Prepare output directory and check the C extension
+- name: Clone the publish repository
   hosts: localhost
-  connection: local
-  gather_facts: no
-  tasks:
-    - name: Ensure output/facts directory exists
-      file:
-        path: "{{ playbook_dir }}/../output/facts"
-        state: directory
-        mode: "0755"
-
-    # The prebuilt scripts/_hanan.abi3.so is used as-is (no compiler
-    # needed). Loading pathfinder here fails fast, before touching any
-    # device, if it can't be loaded on this execution environment.
-    - name: Check the C extension loads
-      command: python3 -c "import pathfinder; print(pathfinder._hanan.__file__)"
-      args:
-        chdir: "{{ playbook_dir }}/../scripts"
-      changed_when: false
-
-    # Every platform in the inventory must have a read-only policy, and
-    # every command collection will send must pass it, before any device
-    # is contacted. The plan is printed so the job log shows exactly what
-    # will be run.
-    - name: Check the read-only command plan for each platform
-      command: python3 collect.py --plan --platform {{ item }}
-      args:
-        chdir: "{{ playbook_dir }}/../scripts"
-      loop: "{{ groups['network_devices'] | map('extract', hostvars, 'ansible_network_os') | unique | list }}"
-      register: command_plan
-      changed_when: false
-
-    - name: Show the read-only command plan
-      debug:
-        msg: "{{ command_plan.results | map(attribute='stdout_lines') | list }}"
-
-- name: Gather show-command output from all inventory devices
-  hosts: network_devices
-  # scripts/collect.py does the SSH itself, from the controller: it drives
-  # the system ssh client through a pty (stdlib only) so it can answer
-  # in-session "User Name:/Password:" prompts, pagers and "enable", which
-  # ansible.builtin.raw can't. So Ansible itself never connects to the device.
   connection: local
   gather_facts: no
   vars:
-    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    root: "{{ playbook_dir }}/.."
+    publish_dir: "{{ root }}/output/publish"
+    publish_path: "{{ bitbucket_path | default('topology') }}"
+    publishing: "{{ (bitbucket_repo_url | default('')) | length > 0 }}"
   tasks:
-    # Firewalls and Windows servers can have their own account
-    # (PANOS_* / WINDOWS_*); without one they use the Network credential.
-    - name: Check device credentials were provided
-      assert:
-        that: >-
-          (net_username | length > 0 and net_password | length > 0)
-          or (ansible_network_os == 'panos'
-              and panos_username | length > 0 and panos_password | length > 0)
-          or (ansible_network_os in ['windows', 'win']
-              and windows_username | length > 0 and windows_password | length > 0)
-        fail_msg: >-
-          No device credentials in the job environment for this host. In
-          AWX, attach a credential of the built-in "Network" type to this
-          job template (it sets ANSIBLE_NET_USERNAME / ANSIBLE_NET_PASSWORD),
-          or the Palo Alto / Windows credential type for those hosts.
-          Running by hand: export NET_USERNAME and NET_PASSWORD.
-        quiet: true
+    - name: Remove the clone from an earlier run
+      file:
+        path: "{{ publish_dir }}"
+        state: absent
 
-    # SSH for Cisco, the XML API for PAN-OS, PowerShell over SSH for
-    # Windows (the driver decides). The panos_* variables only apply to
-    # firewalls: see inventory.yml.
-    - name: Collect show-command output
+    # A password in the URL would be on git's command line and in this log
+    - name: Check the repository URL holds no credential
+      assert:
+        that: bitbucket_repo_url is not regex('://[^/@]*:[^/@]*@')
+        fail_msg: >-
+          bitbucket_repo_url has a password or token in it. Remove it: the
+          credential comes from BITBUCKET_USERNAME and BITBUCKET_TOKEN.
+        quiet: true
+      when: publishing | bool
+
+    - name: Check the folder is inside the repository
+      assert:
+        that:
+          - publish_path is not regex('^/')
+          - "'..' not in publish_path.split('/')"
+        fail_msg: "bitbucket_path must be a folder inside the repository, not {{ publish_path }}."
+        quiet: true
+      when: publishing | bool
+
+    - name: Check the repository credential was provided
+      assert:
+        that:
+          - lookup('env', 'BITBUCKET_USERNAME') | length > 0
+          - lookup('env', 'BITBUCKET_TOKEN') | length > 0
+        fail_msg: >-
+          No repository credential in the job environment. In AWX, attach
+          the Bitbucket credential (custom type, see the README) to this job
+          template. Running by hand: export BITBUCKET_USERNAME and
+          BITBUCKET_TOKEN.
+        quiet: true
+      when: publishing | bool and bitbucket_repo_url is regex('^https?://')
+
+    - name: Make sure the script that answers git's prompts can run
+      file:
+        path: "{{ root }}/scripts/git_askpass.sh"
+        mode: "0755"
+      when: publishing | bool
+
+    # BITBUCKET_USERNAME and BITBUCKET_TOKEN are already in the job's
+    # environment, which git inherits. They are not repeated here: a value
+    # under `environment:` is put on a command line by Ansible.
+    - name: Clone the publish repository
       command: >-
-        python3 {{ playbook_dir }}/../scripts/collect.py
-        --name {{ inventory_hostname }}
-        --host {{ ansible_host | default(inventory_hostname) }}
-        {{ ('--port ' ~ ansible_port) if ansible_port is defined else '' }}
-        --platform {{ ansible_network_os }}
-        --out {{ playbook_dir }}/../output/facts/{{ inventory_hostname }}.json
-        --ssh-args {{ net_ssh_args | default('') | quote }}
-        {{ ('--panorama ' ~ panorama_host) if (panos_via_panorama | default(false) | bool) else '' }}
-        {{ ('--serial ' ~ panos_serial) if (panos_via_panorama | default(false) | bool) and panos_serial is defined else '' }}
-        {{ ('--ca-file ' ~ (panos_ca_file | quote)) if panos_ca_file is defined else '' }}
-        {{ '--no-verify-tls' if not (panos_verify_tls | default(true) | bool) else '' }}
-      # Credentials go to collect.py through the environment, never argv.
+        git -c credential.helper=
+        {{ ('-c http.sslCAInfo=' ~ (bitbucket_ca_file | quote)) if bitbucket_ca_file is defined else '' }}
+        clone --depth 1 --branch {{ bitbucket_branch | default('main') | quote }}
+        {{ bitbucket_repo_url | quote }} {{ publish_dir | quote }}
       environment:
-        NET_USERNAME: "{{ net_username }}"
-        NET_PASSWORD: "{{ net_password }}"
-        NET_ENABLE_PASSWORD: "{{ net_enable_password }}"
-        PANOS_USERNAME: "{{ panos_username }}"
-        PANOS_PASSWORD: "{{ panos_password }}"
-        WINDOWS_USERNAME: "{{ windows_username }}"
-        WINDOWS_PASSWORD: "{{ windows_password }}"
-      register: collect_result
+        GIT_ASKPASS: "{{ root }}/scripts/git_askpass.sh"
+        GIT_TERMINAL_PROMPT: "0"
+      register: clone
+      changed_when: false
+      failed_when: false
+      when: publishing | bool
+
+    - name: Fail if the repository couldn't be cloned
+      assert:
+        that: clone.rc == 0
+        fail_msg: >-
+          Couldn't clone {{ bitbucket_repo_url }} (branch
+          {{ bitbucket_branch | default('main') }}):
+          {{ clone.stderr | default('') }} {{ clone.msg | default('') }}
+          Check that git is installed, the URL, that the branch exists with at least one commit,
+          the Bitbucket credential and, for an internal CA, bitbucket_ca_file.
+        quiet: true
+      when: publishing | bool
+
+- name: Collect, audit and check (collect_facts.yml)
+  import_playbook: collect_facts.yml
+
+- name: Build the diagram (Visio and draw.io)
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  vars:
+    root: "{{ playbook_dir }}/.."
+    publishing: "{{ (bitbucket_repo_url | default('')) | length > 0 }}"
+    # Publishing: the diagram is written straight into the clone, next to
+    # the last published one, which main.py leaves alone if it is unchanged
+    target_dir: "{{ root }}/output/publish/{{ bitbucket_path | default('topology') }}"
+    out_dir: "{{ target_dir if publishing | bool else (root ~ '/output') }}"
+    template: "{{ (target_dir ~ '/template.vsdx') if publishing | bool else (root ~ '/template.vsdx') }}"
+  tasks:
+    # The prebuilt scripts/_hanan.abi3.so is used as-is (no compiler needed)
+    - name: Check the C extension loads
+      command: python3 -c "import pathfinder; print(pathfinder._hanan.__file__)"
+      args:
+        chdir: "{{ root }}/scripts"
       changed_when: false
 
-    # Every line sent to the device, as collect.py logged it (the full
-    # record is also in the facts file under "audit")
-    - name: Show the commands sent to the device
-      debug:
-        var: collect_result.stdout_lines
+    - name: Find this run's facts files
+      find:
+        paths: "{{ root }}/output/facts"
+        patterns: "*.json"
+      register: facts_files
 
-- name: Push all gathered facts to artifact server
-  hosts: artifact_server
-  gather_facts: no
-  tasks:
-    - name: Copy facts directory to artifact server
-      ansible.builtin.copy:
-        src: "{{ playbook_dir }}/../output/facts/"
-        dest: /home/hp/Projects/autotop-awx/output/facts/
+    - name: Note the inventory devices with no facts file from this run
+      set_fact:
+        missing_facts: "{{ groups['network_devices'] | difference(facts_files.files | map(attribute='path') | map('basename') | map('regex_replace', '\\.json$', '') | list) | sort }}"
+
+    # main.py reads three things from an inventory file: each device's icon
+    # and its size (w, h), and the device names, to check the shapes in
+    # template.vsdx against. This writes them from the inventory this job
+    # runs with, whatever file or AWX source it came from, for every device
+    # (not only those collected this run).
+    - name: Write the device list the diagram build reads
+      copy:
+        content: |
+          all:
+            hosts:
+          {% for h in groups['network_devices'] %}
+              {{ h | to_json }}:
+          {% for k in ['icon', 'w', 'h'] if hostvars[h][k] is defined %}
+                {{ k }}: {{ hostvars[h][k] | to_json }}
+          {% endfor %}
+          {% endfor %}
+        dest: "{{ root }}/output/diagram-inventory.yml"
+        mode: "0644"
+
+    - name: Ensure the publish folder exists
+      file:
+        path: "{{ target_dir }}"
+        state: directory
         mode: "0755"
+      when: publishing | bool
 
-- name: Build the diagram (Visio and draw.io) and publish it as a job artifact
-  hosts: localhost
-  connection: local
-  gather_facts: no
-  tasks:
-    - name: Run main.py against the gathered facts
-      command: >-
-        python3 {{ playbook_dir }}/../scripts/main.py
-        {{ playbook_dir }}/../output/facts
-        {{ playbook_dir }}/../output
-      register: build_result
-      # 3: one output format couldn't be written. The others are still
-      # published, and the last play fails the job.
-      failed_when: build_result.rc not in [0, 3]
-
-    - name: Check which diagram files were written
+    - name: Check for a position template in the publish repository
       stat:
-        path: "{{ playbook_dir }}/../output/{{ item }}"
-      loop: [topology.vsdx, topology.drawio]
-      register: diagram_files
+        path: "{{ template }}"
+      register: published_template
+      when: publishing | bool
 
-    - name: Show build script output in the job log
-      debug:
-        var: build_result.stdout_lines
+    - name: Start from the project's position template, if the repository has none
+      copy:
+        src: "{{ root }}/template.vsdx"
+        dest: "{{ template }}"
+        mode: "0644"
+      when: publishing | bool and not published_template.stat.exists and (root ~ '/template.vsdx') is file
 
-- name: Push generated diagram to artifact server
-  hosts: artifact_server
-  gather_facts: no
-  tasks:
-    # topology.vsdx (Visio) and topology.drawio, whichever were written
-    # (config.OUTPUT_FORMATS picks them)
-    - name: Copy the diagram files to artifact server
-      ansible.builtin.copy:
-        src: "{{ item.stat.path }}"
-        dest: "/home/hp/Projects/autotop-awx/{{ item.item }}"
-      loop: "{{ hostvars['localhost'].diagram_files.results }}"
-      loop_control:
-        label: "{{ item.item }}"
-      when: item.stat.exists
-
-- name: Verify every command sent was read-only
-  hosts: localhost
-  connection: local
-  gather_facts: no
-  tasks:
-    # Re-checks each facts file's audit against the read-only policy and
-    # the config-change result. Runs last, so the diagram is still
-    # published, but fails the job if anything was out of policy.
-    - name: Audit the commands recorded in the facts files
+    - name: Build the diagram
       command: >-
-        python3 {{ playbook_dir }}/../scripts/audit.py
-        {{ playbook_dir }}/../output/facts
-      register: audit_result
+        python3 main.py {{ (root ~ '/output/facts') | quote }} {{ out_dir | quote }}
+        {{ ('--inventory=' ~ root ~ '/output/diagram-inventory.yml') | quote }}
+        {{ ('--template=' ~ template) | quote }}
+      args:
+        chdir: "{{ root }}/scripts"
+      register: build_result
       changed_when: false
       failed_when: false
 
-    - name: Show the read-only audit
+    - name: Show the build output
       debug:
-        var: audit_result.stdout_lines
+        msg: "{{ build_result.stdout_lines + build_result.stderr_lines }}"
 
-    - name: Fail the job if the audit found a problem
+    # 3: one output (a format or the template) couldn't be written. The
+    # others are still published, the repository keeps its last copy of the
+    # one that failed, and the job fails at the end.
+    - name: Fail if the diagram couldn't be built
       assert:
-        that: audit_result.rc == 0
-        fail_msg: "Read-only audit failed - see the audit output above."
+        that: build_result.rc in [0, 3]
+        fail_msg: >-
+          main.py exited {{ build_result.rc }} - see the build output above.
+          If it names shapes that don't match any host, a device was removed
+          from or renamed in the inventory: delete its shape from
+          template.vsdx in the publish repository.
         quiet: true
 
-    - name: Fail the job if a diagram file couldn't be written
+- name: Publish the diagram to the repository
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  vars:
+    root: "{{ playbook_dir }}/.."
+    publish_dir: "{{ root }}/output/publish"
+    publish_path: "{{ bitbucket_path | default('topology') }}"
+    publishing: "{{ (bitbucket_repo_url | default('')) | length > 0 }}"
+    complete: "{{ missing_facts | length == 0 or (bitbucket_publish_partial | default(false) | bool) }}"
+    do_publish: "{{ publishing | bool and complete | bool }}"
+    job_label: "{{ awx_job_id | default(tower_job_id) | default('a run by hand') }}"
+  tasks:
+    - name: Copy the facts files into the repository
+      copy:
+        src: "{{ root }}/output/facts/"
+        dest: "{{ publish_dir }}/{{ publish_path }}/facts/"
+        mode: "0644"
+      when: do_publish | bool and (bitbucket_publish_facts | default(false) | bool)
+
+    # New and changed files only: a diagram file that couldn't be written
+    # this run is not deleted from the repository
+    - name: Stage the changes
+      command: git add --ignore-removal -- {{ publish_path | quote }}
+      args:
+        chdir: "{{ publish_dir }}"
+      changed_when: false
+      when: do_publish | bool
+
+    - name: Check whether anything changed
+      command: git diff --cached --name-status
+      args:
+        chdir: "{{ publish_dir }}"
+      register: git_status
+      changed_when: false
+      when: do_publish | bool
+
+    - name: Commit
+      command: >-
+        git -c user.name={{ bitbucket_author_name | default('autotop AWX') | quote }}
+        -c user.email={{ bitbucket_author_email | default('autotop@localhost') | quote }}
+        commit -q -m {{ ('Topology from AWX job ' ~ job_label) | quote }}
+      args:
+        chdir: "{{ publish_dir }}"
+      when: do_publish | bool and git_status.stdout | length > 0
+
+    - name: Push
+      command: >-
+        git -c credential.helper=
+        {{ ('-c http.sslCAInfo=' ~ (bitbucket_ca_file | quote)) if bitbucket_ca_file is defined else '' }}
+        push origin HEAD:{{ ('refs/heads/' ~ (bitbucket_branch | default('main'))) | quote }}
+      args:
+        chdir: "{{ publish_dir }}"
+      environment:
+        GIT_ASKPASS: "{{ root }}/scripts/git_askpass.sh"
+        GIT_TERMINAL_PROMPT: "0"
+      register: push
+      failed_when: false
+      when: do_publish | bool and git_status.stdout | length > 0
+
+    - name: Fail if the push was refused
+      assert:
+        that: push.rc == 0
+        fail_msg: >-
+          The push to {{ bitbucket_repo_url }} was refused:
+          {{ push.stderr | default('') }} {{ push.msg | default('') }}
+          If someone committed to {{ bitbucket_branch | default('main') }}
+          during the run (an edited template.vsdx, say), run the job again.
+          Otherwise check the credential can write to the repository.
+        quiet: true
+      when: do_publish | bool and git_status.stdout | length > 0
+
+    - name: Say what was published
+      debug:
+        msg: >-
+          {% if not publishing | bool %}Not published: bitbucket_repo_url is not set. The files are in output/, in this job only.
+          {% elif not complete | bool %}Not published: no facts file from this run for {{ missing_facts | join(', ') }}.
+          {% elif git_status.stdout | length == 0 %}Nothing changed since the last publish, so there is nothing to commit.
+          {% else %}Published to {{ bitbucket_repo_url }}, branch {{ bitbucket_branch | default('main') }}: {{ git_status.stdout_lines | map('regex_replace', '\s+', ' ') | join(', ') }}
+          {% endif %}
+
+    - name: Fail the job if the diagram is incomplete and wasn't published
+      assert:
+        that: complete | bool
+        fail_msg: >-
+          Not published: {{ missing_facts | join(', ') }} had no facts file
+          from this run, so the diagram and the position template would
+          leave them out. Fix those hosts (or widen collect_platforms), or
+          set bitbucket_publish_partial=true to publish anyway.
+        quiet: true
+      when: publishing | bool
+
+    - name: Fail the job if a diagram file or the template couldn't be written
       assert:
         that: build_result.rc == 0
-        fail_msg: "A diagram file couldn't be written (the others were published) - see the build output above."
+        fail_msg: "An output couldn't be written (the others were published) - see the build output above."
         quiet: true

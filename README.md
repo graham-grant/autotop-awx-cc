@@ -7,9 +7,11 @@ fixed PowerShell scripts over OpenSSH for Windows servers), and draws a
 diagram of how they connect. The diagram is written as a Microsoft Visio
 file and as a draw.io file, each directly by its own writer, so neither
 format depends on the other (see [Output formats](#output-formats)).
-It runs as a single AWX job (or `ansible-playbook` by hand) and needs nothing
-beyond Ansible and a base Python 3.8+ install: no NAPALM, no Ansible
-collections, no PyYAML, nothing to `pip install`, and no compiler.
+It runs as a single AWX job (or `ansible-playbook` by hand), which publishes
+the diagram by committing it to a git repository such as an internal
+Bitbucket. It needs nothing beyond Ansible, a base Python 3.8+ install and,
+to publish, git: no NAPALM, no Ansible collections, no PyYAML, nothing to
+`pip install`, and no compiler.
 
 Collection is strictly read-only. Every command sent to a device is checked
 against a per-platform allowlist before it is sent, recorded, and verified
@@ -48,8 +50,8 @@ Contents:
 
 | Path | What it is |
 | --- | --- |
-| `inventory.yml` | The Ansible inventory: devices in `network_devices`, the file server in `artifact_server` |
-| `playbooks/gather_topology.yml` | The whole pipeline: collect, build, publish, audit |
+| `inventory.yml` | The Ansible inventory: devices in `network_devices` |
+| `playbooks/gather_topology.yml` | The whole pipeline: collect, audit and check, build the diagram, and publish it to a git repository (Bitbucket) |
 | `playbooks/preflight.yml` | Checks an execution environment without contacting any device: Python and OpenSSH versions, the test suite, the read-only plan |
 | `playbooks/collect_facts.yml` | Collection only: collect, audit and check the JSON, with no diagram (stage 1 of the [production roadmap](docs/design-archive/2026-11-11/production-roadmap.md)) |
 | `dummy/` | Simulated Cisco IOS devices for a test run that contacts no real device: `dummy/bin/ssh` stands in for the ssh client, and `dummy/inventory` lists the dummy hosts |
@@ -66,6 +68,7 @@ Contents:
 | `scripts/check_facts.py` | Checks each facts file's JSON: keys, types, allowed values and formats, and that what was sent and kept matches the plan |
 | `scripts/drivers/` | Platform drivers: turn each platform's output into the common device record (schema 2), one module per platform (`ios.py`, `panos.py`, `windows.py`), plus shared MAC and interface-name helpers (`common.py`) |
 | `scripts/drivers/powershell/` | The fixed PowerShell scripts run on Windows servers, each checked by the read-only policy before it is sent |
+| `scripts/git_askpass.sh` | Answers git's username and password prompts from the job's environment when the diagram is published |
 | `scripts/main.py` | Entry point for building the diagram |
 | `scripts/facts.py` | Loads the JSON files as schema 2 records |
 | `scripts/links.py` | Works out the links from LLDP/CDP, MAC tables and shared subnets |
@@ -118,10 +121,6 @@ all:
           hosts:
             srv-win1:
               ansible_host: 10.0.10.21
-    artifact_server:
-      hosts:
-        diagram-host:
-          ansible_host: 192.168.10.175
 ```
 
 `icon`, `w` and `h` can also be set once for a whole group under `vars:`.
@@ -160,7 +159,11 @@ plug into in the same job.
 ### Credentials
 
 Credentials are read from the job's environment and are never stored in the
-repository or passed on a command line.
+repository or passed on a command line. The playbooks don't repeat them
+under a task's `environment:` either, because Ansible puts those values on
+a command line (visible in the process list, and in the job log at
+verbosity 3): `collect.py` and git read them from the environment the job
+already has.
 
 - **In AWX**, attach a credential of the built-in **Network** type to the job
   template. It sets `ANSIBLE_NET_USERNAME` and `ANSIBLE_NET_PASSWORD`. If the
@@ -205,6 +208,29 @@ env:
 
 The Palo Alto type is the same with `PANOS_USERNAME` and `PANOS_PASSWORD`.
 
+Publishing the diagram needs an account that can write to the repository
+it is published to (see [Publishing to Bitbucket](#publishing-to-bitbucket)):
+`BITBUCKET_USERNAME` and `BITBUCKET_TOKEN`, where the token is an HTTP
+access token of that account (or its password). In AWX, one more custom
+credential type:
+
+```yaml
+# Input configuration
+fields:
+  - {id: username, type: string, label: Username}
+  - {id: token, type: string, label: Token, secret: true}
+required: [username, token]
+# Injector configuration
+env:
+  BITBUCKET_USERNAME: "{{ username }}"
+  BITBUCKET_TOKEN: "{{ token }}"
+```
+
+git asks for the two values through `scripts/git_askpass.sh`
+(`GIT_ASKPASS`), which prints them from the environment. They are never in
+the repository URL, on a command line, in git's configuration or in the job
+log, and git is run with no credential helper, so nothing is stored.
+
 ### SSH options
 
 Devices that only offer old key-exchange or host-key algorithms need extra
@@ -219,17 +245,27 @@ places Ansible looks for it.
 
 ## Data collection, step by step
 
-`playbooks/gather_topology.yml` runs six plays in order.
+`playbooks/gather_topology.yml` runs six plays in order. Plays 2 to 4 are
+`playbooks/collect_facts.yml`, imported unchanged (see
+[Collection only](#collection-only-collect_factsyml)).
 
-**Play 1: prepare (localhost).**
-It creates `output/facts/`, then imports `pathfinder.py` to confirm the
-prebuilt C extension loads. It then prints the read-only command plan for
-each platform in the inventory (`collect.py --plan`): every command that
-will be sent, each checked against the read-only policy. If the C extension
-can't load, a platform has no read-only policy, or a planned command would
-be refused, the job stops here, before any device is contacted.
+**Play 1: clone the publish repository (localhost).**
+If `bitbucket_repo_url` is set, it clones that repository's branch into
+`output/publish/` (see [Publishing to Bitbucket](#publishing-to-bitbucket)).
+A wrong URL, branch or credential stops the job here, before any device is
+contacted. Without `bitbucket_repo_url` the play does nothing.
 
-**Play 2: collect (every host in `network_devices`).**
+**Play 2: plan (localhost).**
+It creates `output/facts/`, removes facts files left from an earlier run,
+and prints the read-only command plan for each platform in the inventory
+(`collect.py --plan`): every command that will be sent, each checked
+against the read-only policy. If a platform has no read-only policy, or a
+planned command would be refused, the job stops here, before any device is
+contacted.
+
+**Play 3: collect (every host in `network_devices`).**
+Each host's platform must be in `collect_platforms` (default `[ios]`); any
+other host fails without being contacted.
 Ansible doesn't connect to the devices itself (`connection: local`). For each
 device, Ansible's normal forks run `scripts/collect.py` on the controller.
 For a Cisco device it does the following (Palo Alto firewalls and Windows
@@ -318,12 +354,12 @@ features included, works from these JSON files.
 
 ### Collection only: `collect_facts.yml`
 
-`playbooks/collect_facts.yml` runs the same collection with the same
-safeguards, and stops there: it builds no diagram and, unless
-`artifact_facts_dir` is set, copies nothing. It is stage 1 of the
-[production roadmap](docs/design-archive/2026-11-11/production-roadmap.md),
+`playbooks/collect_facts.yml` is the collection on its own: it builds no
+diagram and copies nothing anywhere. It is stage 1 of the
+[production roadmap](docs/design-archive/2026-11-14/production-roadmap.md),
 for confirming that SSH works and that the JSON is right before anything
-else runs. It has four plays:
+else runs, and `gather_topology.yml` imports it as its plays 2 to 4. It has
+three plays:
 
 1. **Plan (localhost).** It creates `output/facts/` and `output/dummy/`, removes facts files
    left from an earlier run (so only this run's files are checked), and
@@ -332,14 +368,11 @@ else runs. It has four plays:
 2. **Collect (every host in `network_devices`).** Each host's platform must
    be in `collect_platforms` (default `[ios]`); any other host fails without
    being contacted, so firewalls and servers are left alone until their
-   stage. Then the credential check and `collect.py`, as in play 2 above.
+   stage. Then the credential check and `collect.py`, as described above.
    The lines sent are printed whether collection worked or not, and a host
    whose `collect.py` exited non-zero fails (exit 3: a read-only safeguard
    stopped it or the configuration changed).
-3. **Copy (optional, `artifact_server`).** Copies `output/facts/` to
-   `artifact_facts_dir` on the artifact server, only if that variable is
-   set.
-4. **Check (localhost).** Runs `audit.py` and then `check_facts.py` on
+3. **Check (localhost).** Runs `audit.py` and then `check_facts.py` on
    `output/facts/`, prints both, and fails the job if either found a
    problem. With `show_facts=true` it also prints each facts file, without
    its raw output and audit, in the job log.
@@ -401,6 +434,10 @@ moves during collection; with `dummy_mode: confirm`, the first `show`
 command asks `[confirm]`. Both hosts must fail (exit 3), and the confirm
 one's log must show `ctrl-c`, never an answer. `dummy/inventory` has
 both, commented out. Only IOS hosts can be dummies.
+
+`gather_topology.yml` runs with `dummy/inventory` in the same way, and
+draws and publishes a diagram of the four dummy devices (four nodes and
+two links). Give it its own `bitbucket_path`, such as `topology-dummy`.
 
 ### Device facts format
 
@@ -474,27 +511,31 @@ by the feature that draws it. **raw** keeps exactly what was collected.
 - If a parser fails on a device, the file is still written with its raw
   output and a `parse_error`, and the device appears with no links.
 
-**Play 3: copy the facts (`artifact_server`).**
-It copies `output/facts/` to the artifact server, so the raw data outlives
-the AWX job container.
-
-**Play 4: build (localhost).**
-It runs `scripts/main.py output/facts output` and prints its output in the
-job log. The next section covers what it does.
-
-**Play 5: publish (`artifact_server`).**
-It copies `output/topology.vsdx` and `output/topology.drawio` to the
-artifact server, each one that was written.
-
-**Play 6: audit (localhost).**
+**Play 4: audit and check (localhost).**
 It runs `scripts/audit.py output/facts`, which re-checks every recorded
 command in every facts file against the read-only policy, independently of
-the check made when it was sent, and prints one line per device. The job
-fails if any command was out of policy, refused or cancelled, if a
-configuration changed, or if a facts file has no audit record. It runs last,
-so the diagram is still published. It also fails the job if either diagram
-file couldn't be written (see [Output formats](#output-formats)); the other
-one is published either way.
+the check made when it was sent, and prints one line per device. Then it
+runs `scripts/check_facts.py` on the same files. The job fails here, with
+nothing built or published, if any command was out of policy, refused or
+cancelled, if a configuration changed, if a facts file has no audit record,
+or if a facts file's JSON is wrong.
+
+**Play 5: build (localhost).**
+It confirms the prebuilt C extension loads, writes
+`output/diagram-inventory.yml` (each inventory device's name, `icon`, `w`
+and `h`, taken from the inventory the job runs with, which is all
+`main.py` reads from an inventory), and runs `scripts/main.py`, printing its
+output in the job log. The next section covers what it does. When the job
+publishes, the diagram and `template.vsdx` are written into the clone, in
+the `bitbucket_path` folder; otherwise the diagram goes to `output/` and the
+template is the project's `template.vsdx`.
+
+**Play 6: publish (localhost).**
+It commits what changed in that folder and pushes it. The job fails at the
+end if the push was refused, if a diagram file or the template couldn't be
+written (see [Output formats](#output-formats); the others are published
+either way), or if the diagram is incomplete and so wasn't published (see
+[Publishing to Bitbucket](#publishing-to-bitbucket)).
 
 ## Read-only collection
 
@@ -514,10 +555,10 @@ left to the command lists. The full design is in
 | Enforced at the lowest layer | `scripts/sshcli.py`, `scripts/xmlapi.py` | `CliSession.run()`, `PowerShellSession.run()` and `ApiSession.run()` refuse to send anything the policy doesn't allow, and a session with no policy sends nothing. The only other input ever typed over SSH is the login answers, `enable` and `exit`; over the API, the one login request. A Windows server gets only the
 password, at the SSH prompt. Plain http is refused except to localhost (the tests' fake API). |
 | Confirmations are never answered | `scripts/sshcli.py` | If a device asks `[confirm]`, `[yes/no]`, `(y/n)` or `...]?`, the session sends Ctrl-C, stops using the session and fails the host. A command that times out is also cancelled with Ctrl-C before anything else is sent. |
-| Plan before connecting | `collect.py --plan`, play 1 | Prints every command per platform and stops the job if any would be refused. |
+| Plan before connecting | `collect.py --plan`, play 2 | Prints every command per platform and stops the job if any would be refused. |
 | Audit trail | `sshcli.py`, `collect.py` | Every line sent is printed in the job log and stored with a timestamp and outcome in the facts file. |
 | Configuration-change check | `collect.py`, `drivers/ios.py`, `drivers/panos.py` | A marker is read before and after collection: the `Last configuration change` line on IOS, and the newest commit job from `show jobs all` on PAN-OS (a commit is the only way a firewall's running configuration changes). If it moved, the host fails loudly. If it can't be read (for example, an IOS account below privilege 15), a warning says so. Windows has no such marker, so the check is recorded as `unsupported` there. |
-| Verification after the run | `scripts/audit.py`, play 6 | Re-checks every recorded command or request and the configuration check, checks an API login came first, and fails the job on any problem. For Windows it re-checks the script with the recorded SHA-256, so the audit fails if the script that ran isn't the one in the repository. |
+| Verification after the run | `scripts/audit.py`, play 4 | Re-checks every recorded command or request and the configuration check, checks an API login came first, and fails the job on any problem. For Windows it re-checks the script with the recorded SHA-256, so the audit fails if the script that ran isn't the one in the repository. |
 | Command inventory test | `tests/test_readonly.py` | Checks every command any driver or feature can emit, enabled or not, against its platform's policy, and checks a list of dangerous commands is refused. A new command that isn't read-only fails the tests. |
 
 To see what would be sent without contacting anything:
@@ -643,9 +684,11 @@ a PNG, or an SVG wrapping one, is reported and skipped.
 
 #### Node positions
 
-Node positions are kept in `template.vsdx` at the project root, a
+Node positions are kept in `template.vsdx`, a
 stripped-down Visio diagram with one shape per device (showing its icon, if
-it has one) and nothing else. To move nodes, open that file in Visio, drag
+it has one) and nothing else. It is at the project root, or, when the job
+publishes the diagram, in the published folder of the repository (see
+[Publishing to Bitbucket](#publishing-to-bitbucket)). To move nodes, open that file in Visio, drag
 them, and save. The next run uses the new positions. Each run rewrites the
 file to match the inventory: existing nodes keep their positions, and new
 devices appear in the staging grid, ready to be dragged into place. If the
@@ -968,10 +1011,18 @@ aren't read back. In Visio, links are
 plain lines, not connectors glued to the shapes, so moving a node in Visio
 leaves its links where they were.
 
-If a writer fails, `main.py` deletes any older copy of its file so a stale
-one is never published, still writes the other formats and
-`template.vsdx`, and exits with status 3. The playbook then publishes the
-files that were written and fails the job in its last play.
+A file changes only when the diagram does. The draw.io file depends on
+nothing but the diagram, and the Visio writer leaves a `topology.vsdx` or
+`template.vsdx` that already holds the same diagram as it is (the only part
+that would differ is the one recording when the file was written). So a
+published repository gets a commit only when the topology or the layout
+changed, and its history shows when that was.
+
+If a writer fails, `main.py` deletes any older copy of its file from the
+output folder, still writes the other formats and `template.vsdx`, and
+exits with status 3. The playbook then publishes the files that were
+written, leaves the repository's last copy of the failed one as it was, and
+fails the job at its end.
 
 ## Configuration reference
 
@@ -1010,9 +1061,10 @@ overriding `OUTPUT_FORMATS`: `--formats=vsdx` writes only the Visio file
 
 Before the first job on a new execution environment, and after any change
 to the project, run `playbooks/preflight.yml`. It contacts no device: it
-checks for Python 3.8 or later and the OpenSSH client, runs the test suite
-on that environment's Python, and prints the read-only command plan for
-each platform in the inventory.
+checks for Python 3.8 or later and the OpenSSH client, reports whether git
+is installed and the C extension loads (both needed only by
+`gather_topology.yml`), runs the test suite on that environment's Python,
+and prints the read-only command plan for each platform in the inventory.
 
 To collect and check the JSON only, with no diagram, use
 `playbooks/collect_facts.yml` in place of `gather_topology.yml` below (see
@@ -1029,21 +1081,26 @@ out of its first lines. Don't pick `dummy/bin/ssh`, which is listed only
 because it is executable.
 
 **In AWX:** create a job template for `playbooks/gather_topology.yml` with
-the project's `inventory.yml` as its inventory, and attach a Network
-credential (plus the Palo Alto and Windows credentials, if those use their
-own accounts). When the job finishes, the diagram (`topology.vsdx` and
-`topology.drawio`) is at the path on the artifact server that the publish
-play copies it to, and the raw JSON is
-alongside it under `output/facts/`. The stock AWX execution environment is
-enough, since everything the job needs is standard Python and the OpenSSH
-client.
+the inventory, a Network credential (plus the Palo Alto and Windows
+credentials, if those use their own accounts) and the Bitbucket credential,
+and set `bitbucket_repo_url` in its extra variables. When the job finishes,
+the diagram (`topology.vsdx` and `topology.drawio`) and `template.vsdx` are
+in that repository. An AWX job's files are deleted with its container, so
+without `bitbucket_repo_url` the diagram is built and then lost. The
+execution environment needs only Python 3.8 or later, the OpenSSH client
+and, to publish, git.
 
 **By hand:**
 
 ```bash
 export NET_USERNAME=admin NET_PASSWORD=secret
-ansible-playbook -i inventory.yml playbooks/gather_topology.yml
+export BITBUCKET_USERNAME=svc-autotop BITBUCKET_TOKEN=...
+ansible-playbook -i inventory.yml playbooks/gather_topology.yml \
+  -e bitbucket_repo_url=https://bitbucket.example.com/scm/net/topology.git
 ```
+
+Without `-e bitbucket_repo_url=...` (and the two `BITBUCKET_` variables)
+the diagram is written to `output/` and nothing is published.
 
 To rebuild the diagram from JSON that's already been collected, without
 contacting any device:
@@ -1054,6 +1111,52 @@ python3 scripts/main.py output/facts output
 
 Open `output/topology.vsdx` in Visio, or `output/topology.drawio` in
 draw.io (desktop, web, or the VS Code extension).
+
+### Publishing to Bitbucket
+
+`gather_topology.yml` publishes by committing to a git repository over
+HTTPS: an internal Bitbucket, or any git server. These variables control
+it (extra variables in AWX, `-e` by hand):
+
+| Variable | Meaning |
+| --- | --- |
+| `bitbucket_repo_url` | The repository's HTTPS clone URL, with no user name or password in it. Unset: nothing is published. |
+| `bitbucket_branch` | The branch to commit to (default `main`). It must already exist, with at least one commit. |
+| `bitbucket_path` | The folder in the repository for the files (default `topology`; `.` is the repository root). Use a different folder or branch for each inventory, such as `topology-dummy` and `topology-dev`, because each has its own devices and its own `template.vsdx`. |
+| `bitbucket_ca_file` | A CA bundle to verify the server's certificate against, if it is signed by an internal CA the execution environment doesn't trust. Certificates are always verified. |
+| `bitbucket_publish_facts` | `true`: also commit the facts JSON files, under `<bitbucket_path>/facts/` (default `false`). They hold each command's raw output, and change on every run. |
+| `bitbucket_publish_partial` | `true`: publish even though some inventory devices have no facts file from this run (default `false`). |
+| `bitbucket_author_name`, `bitbucket_author_email` | The commit author (default `autotop AWX`, `autotop@localhost`). |
+
+The credential is `BITBUCKET_USERNAME` and `BITBUCKET_TOKEN` (see
+[Credentials](#credentials)). Each run that changes something makes one
+commit, `Topology from AWX job <job id>`, holding `topology.vsdx`,
+`topology.drawio` and `template.vsdx`. A run that changes nothing commits
+nothing and says so.
+
+**Node positions.** `template.vsdx` in the published folder is the position
+template. To arrange the diagram, get it from the repository, move the
+nodes in Visio, save, and commit it back; the next job uses those
+positions and publishes the diagram drawn with them. On the first run the
+repository has no template, so every node starts in the staging grid (or
+from the project's own `template.vsdx`, if there is one). If a device is
+removed from the inventory or renamed, delete its shape from the template
+too: the build stops on a shape that matches no device.
+
+**Only a complete diagram is published.** The diagram and the template
+hold only the devices collected in this run. If some inventory devices
+have no facts file (a host failed, its platform isn't in
+`collect_platforms`, or the job ran with a limit), publishing would drop
+them from the diagram and lose their positions in the template. So the job
+builds the diagram, doesn't publish it, and fails, naming the devices.
+`bitbucket_publish_partial=true` publishes anyway.
+
+**What stops the job, and when.** Before any device is contacted: a URL
+with a password in it, a missing credential, or a repository or branch
+that can't be cloned. After collection: a failed audit or facts check
+(nothing is built or published). At the end: a refused push. If someone
+pushed to the branch while the job ran (an edited template, say), the push
+is refused and nothing is overwritten; run the job again.
 
 ## The C extension
 
@@ -1115,7 +1218,12 @@ through the real SSH session against the fake `ssh` replaying fixture
 output passes and matches the driver, and one broken record per rule), and
 the dummy devices (every dummy host collects and passes the check, the
 device's own log equals the audit and the plan, the pager, and the
-configuration-change and confirmation safeguards). `tests/fixtures/windows/` holds a Windows server's script output,
+configuration-change and confirmation safeguards), and publishing (the
+script that answers git's prompts, alone and through git itself, that no
+playbook sets a credential under `environment:` or reads the token's value,
+that the repository is cloned before collection and the diagram is built
+after the audit, and that an unchanged diagram leaves its Visio file and
+the template untouched). `tests/fixtures/windows/` holds a Windows server's script output,
 which `tests/fake_winssh.py` serves as a fake OpenSSH server: it decodes
 the script it is sent and logs it, so the tests check that the server
 received exactly the script the policy checked. The fake `ssh` logs every line it
@@ -1169,6 +1277,13 @@ configuration change fails the host.
 - In the Visio file, links aren't glued to nodes, the small hops where
   links cross aren't drawn.
 - Icons are PNG pictures, not Visio stencil masters.
+- Publishing is over HTTPS with a user name and token only, and needs git
+  in the execution environment. It has been tested against a local git
+  server, not yet against Bitbucket. Two jobs publishing to the same folder
+  at once aren't coordinated: the second push is refused and that job
+  fails.
+- A device removed from the inventory, or renamed, has to be deleted from
+  `template.vsdx` by hand, or the build stops.
 
 ### Scaling to hundreds of devices
 

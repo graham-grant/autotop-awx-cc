@@ -10,7 +10,6 @@ class MiniYamlTest(unittest.TestCase):
         hosts = tree["all"]["children"]["network_devices"]["hosts"]
         self.assertEqual(hosts["9200-1"]["ansible_host"], "192.168.10.241")
         self.assertEqual(hosts["9200-1"]["icon"], "C9200-24P Front")
-        self.assertEqual(tree["all"]["children"]["artifact_server"]["vars"]["ansible_connection"], "ssh")
 
     def test_scalars_and_flow(self):
         doc = miniyaml.safe_load("""
@@ -68,7 +67,7 @@ next: 1
     def test_playbook_parses(self):
         plays = miniyaml.safe_load((support.ROOT / "playbooks" / "gather_topology.yml").read_text())
         self.assertIsInstance(plays, list)
-        self.assertTrue(all("hosts" in p for p in plays))
+        self.assertTrue(all("hosts" in p or "import_playbook" in p for p in plays))
 
     def test_rejects_unsupported(self):
         for text in ("a: &anchor 1\nb: *anchor\n", "a: !!str 1\n", "a: 1\n---\nb: 2\n"):
