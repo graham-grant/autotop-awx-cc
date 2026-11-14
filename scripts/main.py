@@ -270,13 +270,14 @@ def write_outputs(diagram, out_dir, formats) -> list:
             path.unlink(missing_ok=True)   # don't leave an older run's file behind
             continue
         try:
-            writer(diagram, path)
+            result = writer(diagram, path)
         except Exception as e:
             failed.append(fmt)
             path.unlink(missing_ok=True)
             print(f"ERROR: {name} couldn't be written: {type(e).__name__}: {e}")
             continue
-        print(f"Wrote {path}")
+        unchanged = isinstance(result, dict) and result.get("unchanged")
+        print(f"{path} is unchanged" if unchanged else f"Wrote {path}")
     return failed
 
 

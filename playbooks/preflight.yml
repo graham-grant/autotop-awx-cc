@@ -1,8 +1,10 @@
 ---
 # Checks the AWX execution environment can run collection, without
-# contacting any device: the Python and OpenSSH versions, the project's own
-# test suite (which runs the SSH session against a fake device, on this
-# environment's Python), and the read-only command plan for each platform.
+# contacting any device: the Python and OpenSSH versions, whether git is
+# there and the C extension loads (both needed by gather_topology.yml, not
+# by collect_facts.yml), the project's own test suite (which runs the SSH
+# session against a fake device, on this environment's Python), and the
+# read-only command plan for each platform.
 # Run it once on a new execution environment, and after any change to the
 # project, before collect_facts.yml.
 #
@@ -26,11 +28,28 @@
       register: ssh_version
       changed_when: false
 
+    # Only gather_topology.yml needs git, and only to publish the diagram
+    - name: Check for git
+      command: git --version
+      register: git_version
+      changed_when: false
+      failed_when: false
+
+    - name: Check the C extension loads
+      command: python3 -c "import pathfinder; print(pathfinder._hanan.__file__)"
+      args:
+        chdir: "{{ root }}/scripts"
+      register: c_extension
+      changed_when: false
+      failed_when: false
+
     - name: Show the versions
       debug:
         msg:
           - "python3 {{ python_version.stdout }}"
           - "{{ ssh_version.stderr | default(ssh_version.stdout) }}"
+          - "{{ git_version.stdout if git_version.rc == 0 else 'git is NOT installed: gather_topology.yml cannot publish the diagram' }}"
+          - "{{ ('C extension ' ~ c_extension.stdout) if c_extension.rc == 0 else 'The C extension does NOT load: gather_topology.yml cannot build the diagram' }}"
 
     - name: Run the project's tests
       command: python3 -m unittest discover -s tests

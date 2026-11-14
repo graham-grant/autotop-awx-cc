@@ -196,10 +196,13 @@ def template_diagram(nodes, sides: dict) -> dg.Diagram:
 def write_template(path, nodes, sides: dict) -> Path:
     """Write the template for `nodes` (diagram.Shape) to path (as .vsdx).
     The file is only replaced once the new one is complete, so a failure
-    leaves the old template, and its positions, as they were."""
+    leaves the old template, and its positions, as they were. A template
+    that already holds exactly these nodes is left as it is."""
     out = output_path(path)
     buf = io.BytesIO()
     vsdx.write(template_diagram(nodes, sides), buf)
+    if vsdx.same_content(out, buf):
+        return out
     tmp = out.with_name(out.name + ".tmp")
     tmp.write_bytes(buf.getvalue())
     tmp.replace(out)

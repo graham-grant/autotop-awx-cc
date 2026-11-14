@@ -2,18 +2,18 @@
 # Stage 1: read-only data gathering only. Logs in to each device in
 # `network_devices` with scripts/collect.py, writes one JSON facts file per
 # device to output/facts/, then checks every file. It builds no diagram and
-# copies nothing anywhere unless `artifact_facts_dir` is set.
+# copies nothing anywhere. gather_topology.yml imports it, then builds and
+# publishes the diagram.
 #
-# It uses exactly the collection code gather_topology.yml uses, with every
-# read-only safeguard (scripts/readonly.py, sshcli.py, audit.py):
+# Every read-only safeguard applies (scripts/readonly.py, sshcli.py,
+# audit.py):
 #   Play 1  print the read-only command plan for each platform in the
 #           inventory; stop before any device is contacted if a command
 #           would be refused
 #   Play 2  collect, after checking the host's platform is enabled for
 #           this stage (`collect_platforms`); hosts run in parallel up to
 #           the job's forks
-#   Play 3  optional: copy the facts files to the artifact server
-#   Play 4  audit every line sent (audit.py) and check every facts file's
+#   Play 3  audit every line sent (audit.py) and check every facts file's
 #           JSON (check_facts.py); fail the job on any problem
 # A host that fails is marked failed and the others carry on. If every
 # host fails, Ansible stops after play 2: the job log shows why.
@@ -22,8 +22,6 @@
 #   collect_platforms   platforms this stage may contact (default: [ios])
 #   show_facts          true: print each facts file, without its raw output
 #                       and audit, in the job log (default: false)
-#   artifact_facts_dir  copy output/facts/ here on the artifact server
-#                       (default: unset, nothing is copied)
 #
 # Dummy run: with dummy/inventory, every host is a simulated Cisco IOS
 # device (dummy/bin/ssh stands in for the ssh client and replays saved
@@ -165,15 +163,11 @@
         {{ ('--serial ' ~ panos_serial) if (panos_via_panorama | default(false) | bool) and panos_serial is defined else '' }}
         {{ ('--ca-file ' ~ (panos_ca_file | quote)) if panos_ca_file is defined else '' }}
         {{ '--no-verify-tls' if not (panos_verify_tls | default(true) | bool) else '' }}
-      # Credentials go to collect.py through the environment, never argv.
+      # collect.py reads the credentials from the job's environment itself
+      # (it inherits it). They are not repeated here: Ansible puts every
+      # value under `environment:` on a command line, where it would show
+      # in the process list and in the job log at verbosity 3.
       environment:
-        NET_USERNAME: "{{ net_username }}"
-        NET_PASSWORD: "{{ net_password }}"
-        NET_ENABLE_PASSWORD: "{{ net_enable_password }}"
-        PANOS_USERNAME: "{{ panos_username }}"
-        PANOS_PASSWORD: "{{ panos_password }}"
-        WINDOWS_USERNAME: "{{ windows_username }}"
-        WINDOWS_PASSWORD: "{{ windows_password }}"
         PATH: "{{ (root ~ '/dummy/bin:') if dummy | bool else '' }}{{ lookup('env', 'PATH') }}"
         DUMMY_DEVICE: "{{ (root ~ '/' ~ dummy_device) if dummy | bool else '' }}"
         DUMMY_LOG: "{{ dummy_log if dummy | bool else '' }}"
@@ -200,17 +194,6 @@
           read-only safeguard stopped it or the configuration changed). See
           the lines above.
         quiet: true
-
-- name: Copy the facts files to the artifact server (optional)
-  hosts: artifact_server
-  gather_facts: no
-  tasks:
-    - name: Copy facts directory to artifact server
-      ansible.builtin.copy:
-        src: "{{ playbook_dir }}/../output/facts/"
-        dest: "{{ artifact_facts_dir }}/"
-        mode: "0644"
-      when: artifact_facts_dir is defined and artifact_facts_dir | length > 0
 
 - name: Audit the commands sent and check the JSON
   hosts: localhost

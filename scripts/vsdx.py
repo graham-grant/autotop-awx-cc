@@ -42,6 +42,7 @@ never reroutes them; line hops at crossings aren't drawn.
 """
 from __future__ import annotations
 
+import io
 import math
 import re
 import zipfile
@@ -443,9 +444,30 @@ _STYLE_SHEET = (
     + "</StyleSheet></StyleSheets>")
 
 
+# The one part that differs between two files written from the same
+# diagram: it holds only the time the file was written.
+TIME_PART = "docProps/core.xml"
+
+
+def same_content(a, b) -> bool:
+    """True if two .vsdx files (file names or binary file objects) hold the
+    same diagram: every part equal, apart from the time written."""
+    try:
+        with zipfile.ZipFile(a) as za, zipfile.ZipFile(b) as zb:
+            names = set(za.namelist())
+            return names == set(zb.namelist()) and all(
+                za.read(n) == zb.read(n) for n in names if n != TIME_PART)
+    except (OSError, zipfile.BadZipFile):
+        return False
+
+
 def write(diagram: dg.Diagram, path) -> dict:
     """Write `diagram` to `path` (a file name or a binary file object) as
-    .vsdx. Returns {"pages": n, "shapes": n, "images": n}."""
+    .vsdx. Returns {"pages": n, "shapes": n, "images": n}.
+
+    A file at `path` that already holds this diagram is left as it is
+    (the result then has "unchanged": True), so a file kept in version
+    control only changes when the diagram does."""
     page_names, used = {}, set()
     for i, page in enumerate(diagram.pages):
         name = page.name or f"Page-{i + 1}"
@@ -550,9 +572,18 @@ def write(diagram: dg.Diagram, path) -> dict:
         if rels:
             parts[f"visio/pages/_rels/page{i + 1}.xml.rels"] = rels
 
-    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         for name, data in parts.items():
             z.writestr(name, data)
         for png, name in media.items():
             z.writestr(f"visio/media/{name}", png)
-    return {"pages": len(pages), "shapes": shapes, "images": len(media)}
+    result = {"pages": len(pages), "shapes": shapes, "images": len(media)}
+    if hasattr(path, "write"):
+        path.write(buf.getvalue())
+    elif same_content(path, buf):
+        result["unchanged"] = True
+    else:
+        with open(path, "wb") as f:
+            f.write(buf.getvalue())
+    return result
