@@ -1,4 +1,4 @@
-"""The dummy devices (dummy/bin/ssh, dummy/inventory.yml) used for a test
+"""The dummy devices (dummy/bin/ssh, dummy/inventory) used for a test
 run of collect_facts.yml: a whole collection through the real collector
 and SSH session, the device's own log equal to the audit, the pager, and
 the configuration-change and confirmation safeguards firing."""
@@ -21,7 +21,7 @@ from sshcli import CliSession
 
 DUMMY = support.ROOT / "dummy"
 SSH = str(DUMMY / "bin" / "ssh")
-INVENTORY = miniyaml.safe_load((DUMMY / "inventory.yml").read_text())
+INVENTORY = miniyaml.safe_load((DUMMY / "inventory").read_text())
 HOSTS = INVENTORY["all"]["children"]["network_devices"]["hosts"]
 PASSWORD = "dummy-secret-1"
 
