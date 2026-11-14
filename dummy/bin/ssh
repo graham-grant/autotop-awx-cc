@@ -4,7 +4,7 @@ A dummy Cisco IOS switch that stands in for the `ssh` client, for a test
 run of collection that contacts no real device and uses no network.
 
 playbooks/collect_facts.yml puts dummy/bin first on PATH for a host that
-has `dummy_device` set (see dummy/inventory.yml), so scripts/collect.py and
+has `dummy_device` set (see dummy/inventory), so scripts/collect.py and
 sshcli.CliSession run exactly as they would against a real switch. The
 only difference is that `ssh` is this script, which plays the device in
 the pseudo-terminal. It never opens a network connection.

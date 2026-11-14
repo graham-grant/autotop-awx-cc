@@ -52,7 +52,7 @@ Contents:
 | `playbooks/gather_topology.yml` | The whole pipeline: collect, build, publish, audit |
 | `playbooks/preflight.yml` | Checks an execution environment without contacting any device: Python and OpenSSH versions, the test suite, the read-only plan |
 | `playbooks/collect_facts.yml` | Collection only: collect, audit and check the JSON, with no diagram (stage 1 of the [production roadmap](docs/design-archive/2026-11-11/production-roadmap.md)) |
-| `dummy/` | Simulated Cisco IOS devices for a test run that contacts no real device: `dummy/bin/ssh` stands in for the ssh client, and `dummy/inventory.yml` lists the dummy hosts |
+| `dummy/` | Simulated Cisco IOS devices for a test run that contacts no real device: `dummy/bin/ssh` stands in for the ssh client, and `dummy/inventory` lists the dummy hosts |
 | `playbooks/group_vars/` | Credential lookups (`all.yml`) and SSH options (`network_devices.yml`) |
 | `icons/` | The device icons, one PNG file per icon |
 | `docs/design-archive/` | Design documents, one dated folder per revision |
@@ -370,13 +370,13 @@ don't run; the job log already shows why each host failed.
 ### Dummy run: simulated devices
 
 To test the whole job, in AWX or by hand, before any real device is
-contacted, run `collect_facts.yml` with `dummy/inventory.yml` as the
+contacted, run `collect_facts.yml` with `dummy/inventory` as the
 inventory and any Network credential (a dummy device accepts any non-empty
 password):
 
 ```bash
 NET_USERNAME=dummy NET_PASSWORD=dummy \
-  ansible-playbook -i dummy/inventory.yml playbooks/collect_facts.yml
+  ansible-playbook -i dummy/inventory playbooks/collect_facts.yml
 ```
 
 A host with `dummy_device` set is collected with `dummy/bin/ssh` first on
@@ -399,7 +399,7 @@ check. The dummy device:
 With `dummy_mode: configchange` on a host, the configuration-change marker
 moves during collection; with `dummy_mode: confirm`, the first `show`
 command asks `[confirm]`. Both hosts must fail (exit 3), and the confirm
-one's log must show `ctrl-c`, never an answer. `dummy/inventory.yml` has
+one's log must show `ctrl-c`, never an answer. `dummy/inventory` has
 both, commented out. Only IOS hosts can be dummies.
 
 ### Device facts format
@@ -1017,6 +1017,16 @@ each platform in the inventory.
 To collect and check the JSON only, with no diagram, use
 `playbooks/collect_facts.yml` in place of `gather_topology.yml` below (see
 [Collection only](#collection-only-collect_factsyml)).
+
+**Inventories in AWX:** keep each inventory as a file in the repository and
+add it to an AWX inventory as a source ("Sourced from a Project"), then
+sync the source; pasting YAML into an inventory's Variables box creates no
+hosts. AWX's inventory file picker doesn't list `.yml` files: it offers
+files named `hosts` or `inventory`, `.ini` files, executable files and files
+with no extension. So name an inventory file `hosts` or `inventory` (YAML
+needs no extension for Ansible), as `dummy/inventory` is, and keep comments
+out of its first lines. Don't pick `dummy/bin/ssh`, which is listed only
+because it is executable.
 
 **In AWX:** create a job template for `playbooks/gather_topology.yml` with
 the project's `inventory.yml` as its inventory, and attach a Network

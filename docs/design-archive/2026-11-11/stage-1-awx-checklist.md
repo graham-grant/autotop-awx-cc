@@ -1,6 +1,6 @@
 # Stage 1 checklist: read-only data gathering in AWX
 
-Created 2026-11-11 · Status: ready to run · Part of the [production roadmap](production-roadmap.md)
+Created 2026-11-11 · Status: superseded by the [2026-11-14 revision](../2026-11-14/stage-1-awx-checklist.md) · Part of the [production roadmap](production-roadmap.md)
 
 ## What changed
 

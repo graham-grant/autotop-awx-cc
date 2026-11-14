@@ -33,4 +33,5 @@ each change can still be read after the code has moved on.
 | 2026-11-08 | [Production roadmap](2026-11-08/production-roadmap.md) | Superseded by the 2026-11-11 revision. Production runs this repository's code directly, in gated stages; replaces the Copilot rebuild plans on PR #12. Stage 1 (read-only Cisco collection) is ready. |
 | 2026-11-08 | [Stage 1 checklist](2026-11-08/stage-1-awx-checklist.md) | Superseded by the 2026-11-11 revision. Preflight, canary and rollout steps in AWX for read-only data gathering. |
 | 2026-11-11 | [Production roadmap](2026-11-11/production-roadmap.md) | Proposed. Python 3.8 and OpenSSH 8.0 (the production environment), and a dummy run against simulated devices (gate G1) before the canary. |
-| 2026-11-11 | [Stage 1 checklist](2026-11-11/stage-1-awx-checklist.md) | Ready to run. Adds the dummy run (section C). |
+| 2026-11-11 | [Stage 1 checklist](2026-11-11/stage-1-awx-checklist.md) | Superseded by the 2026-11-14 revision. Adds the dummy run (section C). |
+| 2026-11-14 | [Stage 1 checklist](2026-11-14/stage-1-awx-checklist.md) | Ready to run. Inventories as repository files added to AWX as a source (named `hosts` / `inventory`, since AWX doesn't list `.yml`), the 3850 canary set-up, and a correction: `archive log config` records configuration changes only. |

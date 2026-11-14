@@ -25,7 +25,7 @@
 #   artifact_facts_dir  copy output/facts/ here on the artifact server
 #                       (default: unset, nothing is copied)
 #
-# Dummy run: with dummy/inventory.yml, every host is a simulated Cisco IOS
+# Dummy run: with dummy/inventory, every host is a simulated Cisco IOS
 # device (dummy/bin/ssh stands in for the ssh client and replays saved
 # output). The production code runs unchanged and no network is used.
 #
@@ -107,7 +107,7 @@
       win: windows
     platform: "{{ platform_aliases[ansible_network_os | lower] | default(ansible_network_os | lower) }}"
     # A host with dummy_device set is a simulated IOS device (see
-    # dummy/inventory.yml): `ssh` is dummy/bin/ssh, and no network is used.
+    # dummy/inventory): `ssh` is dummy/bin/ssh, and no network is used.
     root: "{{ playbook_dir }}/.."
     dummy: "{{ dummy_device is defined }}"
     dummy_log: "{{ root }}/output/dummy/{{ inventory_hostname }}.log"
